@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Redis Manager — 风格选择</title>
+  <link rel="stylesheet" href="gallery.css" />
+</head>
+<body>
+  <main class="g-wrap">
+    <header class="g-head">
+      <div class="g-eyebrow">Redis Manager · UI 原型</div>
+      <h1>四种风格，同一套功能</h1>
+      <p>点击卡片进入可交互原型。每个原型都支持 <code>?page=overview|browser|cli|monitor|connections|settings</code> 深链，点击卡片上的页面按钮可直达对应页面。功能、信息架构完全一致，差别只在视觉语言和空间组织。</p>
+    </header>
+
+    <section class="g-grid">
+      <a class="g-card" href="terminal.html?page=overview" data-kind="a">
+        <div class="g-preview"><img src="previews/a.png" alt="Terminal 风格总览" loading="lazy" /></div>
+        <div class="g-info">
+          <div class="g-tag">A · 终端极客</div>
+          <h2>Terminal</h2>
+          <p>等宽字体 + 琥珀色荧光，ASCII 进度条与方框，编辑器式标签、状态栏。（第 1 版）</p>
+          <ul><li>适合重度 redis-cli 用户</li><li>信息密度最高</li><li>可一键切换终端/原生风</li></ul>
+          <div class="g-links">
+            <span data-href="overview">总览</span><span data-href="browser">键浏览</span><span data-href="cli">CLI</span><span data-href="monitor">监控</span>
+          </div>
+        </div>
+      </a>
+
+      <a class="g-card" href="craft.html?page=overview" data-kind="b">
+        <div class="g-preview"><img src="previews/b.png" alt="Craft 风格总览" loading="lazy" /></div>
+        <div class="g-info">
+          <div class="g-tag">B · 雅致工具</div>
+          <h2>Craft</h2>
+          <p>暖纸色底、衬线标题、细线与大留白，三栏“目录 · 详情”结构，优雅克制。</p>
+          <ul><li>适合产品化面向团队</li><li>阅读性强、不易疲劳</li><li>时间线呈现操作历史</li></ul>
+          <div class="g-links">
+            <span data-href="overview">总览</span><span data-href="browser">键浏览</span><span data-href="cli">CLI</span><span data-href="monitor">监控</span>
+          </div>
+        </div>
+      </a>
+
+      <a class="g-card" href="console.html?page=overview" data-kind="c">
+        <div class="g-preview"><img src="previews/c.png" alt="Console 风格总览" loading="lazy" /></div>
+        <div class="g-info">
+          <div class="g-tag">C · 数据工作台</div>
+          <h2>Console</h2>
+          <p>深色高密度仪表盘，珊瑚色点缀、等宽数字、⌘K 命令面板、锁屏页。最接近“专业工具”。</p>
+          <ul><li>适合 DBA / 后端工程师</li><li>一屏看到更多信息</li><li>安全：锁屏 + 只读</li></ul>
+          <div class="g-links">
+            <span data-href="overview">总览</span><span data-href="browser">键浏览</span><span data-href="cli">CLI</span><span data-href="monitor">监控</span>
+            <span data-href="overview&palette=1">⌘K</span><span data-href="overview&lock=1">锁屏</span>
+          </div>
+        </div>
+      </a>
+
+      <a class="g-card" href="airy.html?page=overview" data-kind="d">
+        <div class="g-preview"><img src="previews/d.png" alt="Airy 风格总览" loading="lazy" /></div>
+        <div class="g-info">
+          <div class="g-tag">D · 轻盈玻璃</div>
+          <h2>Airy</h2>
+          <p>悬浮大圆角窗口、柔和渐变与光晕、大字号 KPI，卡片式布局，轻盈现代。</p>
+          <ul><li>适合面向普通开发者</li><li>第一眼最友好</li><li>渐变让数据更“有温度”</li></ul>
+          <div class="g-links">
+            <span data-href="overview">总览</span><span data-href="browser">键浏览</span><span data-href="cli">CLI</span><span data-href="monitor">监控</span>
+            <span data-href="overview&palette=1">⌘K</span>
+          </div>
+        </div>
+      </a>
+    </section>
+
+    <footer class="g-foot">
+      对比说明与实现建议见 <a href="../docs/styles.md">docs/styles.md</a> · 截图位于 <code>docs/screenshots/</code>
+    </footer>
+  </main>
+  <script>
+    document.querySelectorAll('.g-links span').forEach((s) => {
+      s.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const card = s.closest('.g-card');
+        const base = card.getAttribute('href').split('?')[0];
+        location.href = base + '?page=' + s.dataset.href;
+      });
+    });
+  </script>
+</body>
+</html>

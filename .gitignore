@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+
+# 截图/调试临时目录
+.chrome-profile/
+.shots/
+
+# 后续 Go / MyGo 工程
+/build/
+/dist/
+/.mygo/
+node_modules/
