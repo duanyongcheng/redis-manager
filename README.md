@@ -1,85 +1,222 @@
+<p align="center">
+  <img src="resources/icon.png" width="96" alt="Redis Manager 图标" />
+</p>
+
 # Redis Manager
 
-基于 Go + MyGo 的 Redis 桌面管理器。Go 侧提供连接保存、连接测试、SCAN、类型化值读取、CLI 执行与指标采样；
-前端是一套共享的页面与状态层，**四套界面主题**（Console / Terminal / Craft / Airy）只是不同的 token。
+一个基于 **Go + MyGo + TypeScript** 的 Redis 桌面管理工具，用于管理连接、浏览键值、执行命令和查看服务器状态。
 
-![Console](docs/screenshots/themes/console-dark-overview.png)
+支持 String、Hash、List、Set、ZSet、Stream 的类型化展示，以及 HTML / Markdown 内容预览。四套主题共享同一套功能，可以按阅读习惯切换。
 
-## 主题
+当前版本为 `0.1.0`，已验证 macOS Apple Silicon 应用构建。
 
-| 主题 | 风格 | 配色 |
-|---|---|---|
-| Console | 深色高密度仪表盘、珊瑚点缀、⌘K 命令面板 | 深 / 浅 |
-| Terminal | 等宽字体、琥珀荧光、`[ ]` 方框与 `█░` 进度条 | 深色 |
-| Craft | 暖纸色、衬线标题、细线与大留白 | 浅 / 深 |
-| Airy | 悬浮圆角窗口、毛玻璃、紫粉渐变 | 深 / 浅 |
+![Console 主题总览](docs/screenshots/themes/console-dark-overview.png)
 
-顶栏的层叠图标或「设置 → 外观」可切换主题，深/浅色按主题能力切换，选择会被记住。
-设计与实现说明见 [docs/themes.md](docs/themes.md)。
+*截图使用演示数据；实际运行时显示所连接 Redis 实例的数据。*
 
-## 开发
+## 功能
 
-环境要求：Go 1.27+、Bun。
+| 模块 | 已实现能力 |
+| --- | --- |
+| 连接管理 | 保存、编辑、删除、分组、测试连接；Standalone / Sentinel / Cluster 连接配置；ACL 用户名、密码与 TLS |
+| 数据库切换 | 按连接记住当前 DB；Cluster 固定使用 DB 0 |
+| 键浏览 | SCAN 游标分页、匹配模式、前缀分组、类型筛选；查看类型、TTL、大小及编码 |
+| 值查看 | String / Hash / List / Set / ZSet / Stream；String 支持原始、JSON、Hex、HTML 和 Markdown |
+| 数据操作 | Hash 字段新增与覆盖、键删除；其他写操作可通过 CLI 执行 |
+| CLI | 多会话、命令历史、命令名补全、只读模式；拦截 `KEYS` 并提示使用 `SCAN` |
+| 总览与监控 | 操作速率、客户端数、内存、网络、键空间、命令统计、INFO、慢查询及主从信息 |
+| 界面 | Console / Terminal / Craft / Airy 四套主题、命令面板、快捷键、偏好记忆 |
+
+远程连接加载时，键元数据按批次通过 pipeline 读取，重复的 Overview 请求会合并，已建立的 Redis 客户端会复用。
+后台默认每 4 秒更新指标；窗口隐藏或相关弹窗打开时暂停采样。浏览值时，指标更新会保留显示格式和未变化预览的滚动位置。
+
+## 快速开始
+
+### 环境
+
+| 工具 | 要求或用途 |
+| --- | --- |
+| Go | `go.mod` 声明的版本为 **1.27.3** |
+| Bun | 安装前端依赖及执行项目脚本；本地验证版本为 1.2.16 |
+| Node.js | 建议 **22.12+**，用于 Vite、构建辅助及浏览器回归脚本 |
+| Redis | 使用你已有的本地或远程实例 |
+| Google Chrome / Chromium | 可选，仅浏览器回归和截图脚本需要 |
+
+MyGo CLI 和前端运行时由项目依赖安装，无需单独全局安装。
+
+在仓库根目录执行：
 
 ```bash
 bun install
-bun run dev          # MyGo 窗口 + Go 绑定 + Vite 开发服务器
-bun run dev:web      # 只启动浏览器预览（没有 Go 绑定，界面会提示服务不可用）
-bun run typecheck    # tsc --noEmit
-bun run build:web    # 构建前端到 dist/
-bun run test:previews # HTML / Markdown 预览浏览器回归（本机 Chrome，无需 Redis）
+bun run dev
 ```
 
-浏览器里带 `?preview=1` 打开时会加载 `scripts/preview-mock.js` 的演示数据，用于截图与纯前端调试。
+`dev` 会启动 Vite 开发服务与 MyGo 桌面窗口，并加载 Go 服务绑定。
 
-String 值支持原始、JSON、Hex、HTML 和 Markdown 预览。预览会解开一层合法的 JSON 字符串包装，
-原始内容保持不变；HTML 保留文档自身样式，模板变量按原文展示。后台采样不会改变选中的格式或重建未变化的预览。
+### 连接并浏览
 
-`test:previews` 会启动临时 Vite 服务和独立的无界面 Chrome，验证两轮实际轮询后的格式、iframe 和滚动位置，
-以及转义解码、表格样式和连接切换。可通过 `CHROME_BIN` 指定 Chromium 路径，
-`bun run test:previews -- .shots/preview-fix` 还会输出 HTML / Markdown 截图。
+1. 点击「新建连接」，填写主机、端口、默认 DB 和部署模式，按需设置认证与 TLS。
+2. 点击「测试连接」，确认可连接后保存。
+3. 在页面顶部选择数据源和数据库，进入「键浏览」。
+4. 使用 `*` 或 `user:*` 等匹配模式执行 SCAN，点击键查看值；需要更多结果时点击「继续 SCAN」。
 
-## macOS 打包
+SCAN 默认 `COUNT` 为 200，可在设置中调整，最大为 1000。`COUNT` 是扫描提示，实际返回数量可能不同；前端最多保留 2000 个键。
+
+### 只预览界面
 
 ```bash
-./scripts/build.sh mac                    # 本机架构 .app + .dmg
-./scripts/build.sh mac --arch universal   # Intel + Apple 芯片通用包
-./scripts/build.sh all                    # macOS + 浏览器版
-./scripts/build.sh checks                 # 只做 tsc + go vet
+bun run dev:web
 ```
 
-脚本会依次执行：环境预检（go / bun / node / mygo CLI）→ 版本与 git revision 汇报 → 清理 `build/`、`dist/` →
-`tsc --noEmit` + `go vet` → `mygo build`（内部先跑 `build:web` 再嵌入）→ 列出产物与体积。
-`--skip-dmg` / `--skip-installer` / `--sign <identity>` / `--no-checks` / `--no-clean` 见 `./scripts/build.sh --help`。
+打开 [本地演示页面](http://localhost:5173/?preview=1)，可使用内置假数据体验主题、页面和交互，无需 Redis。
 
-产物位于 `build/darwin-arm64/`：
+也可以指定页面与主题，例如 [Airy 键浏览](http://localhost:5173/?preview=1&page=browser&theme=airy&scheme=dark)。
+`dev:web` 本身只提供前端页面；连接真实 Redis 请使用 `bun run dev` 或打包后的桌面应用。
 
-- `redis-manager.app`
-- `redis-manager-0.1.0-arm64.dmg`
+## HTML 与 Markdown 预览
 
-打包使用 MyGo 0.7.4，前端先由 Vite 构建并嵌入 Go 应用。版本号唯一来源是 `mygo.config.ts` 的 `version`。连接配置写入 `~/Library/Application Support/Redis Manager/connections.json`；
-密码优先写入 MyGo 的系统凭据存储，不可用时才回退到该受限配置文件。
+选中 String 类型的键后，在值面板顶部切换显示格式：
 
-## 目录
+| 格式 | 展示方式 |
+| --- | --- |
+| 原始 | 查看 Redis 返回的字符串内容 |
+| JSON | 对合法 JSON 进行格式化展示 |
+| Hex | 查看字符串开头内容的十六进制与字符对照 |
+| HTML 预览 | 渲染 HTML 片段或完整文档，保留文档自身的样式与表格排版 |
+| MD 预览 | 渲染标题、段落、强调、链接、列表、引用、代码块、表格及分隔线 |
+
+如果值保存为 JSON 字符串，例如 `"<h1>标题</h1>\r\n<p>正文</p>"`，HTML / MD 预览会先解开一层合法的字符串包装。
+原始、JSON 和 Hex 仍基于保存的内容展示，普通字符串里的反斜杠不会被盲目替换。
+
+HTML 在隔离的 iframe 内预览，脚本及外部资源被禁用；依赖外部 CSS、图片或 JavaScript 的页面可能无法完整呈现。
+`${fundName}` 等模板变量按原文显示，不会执行模板逻辑或填充业务数据。Markdown 支持常用语法，不是完整的 Markdown 编辑器。
+
+后台刷新和同一键的手动重读会保留当前格式；切换键、连接或数据库时回到原始格式。
+
+## 界面主题
+
+| 主题 | 风格 | 配色 |
+| --- | --- | --- |
+| Console | 高密度数据工作台、珊瑚色点缀 | 深色 / 浅色 |
+| Terminal | 等宽字体、琥珀色、ASCII 风格 | 深色 |
+| Craft | 暖纸色、衬线标题与细线排版 | 浅色 / 深色 |
+| Airy | 毛玻璃、大圆角、紫粉渐变 | 深色 / 浅色 |
+
+通过顶栏主题按钮或「设置 → 外观」切换，选择会保存在本地。
+更多截图与实现说明见 [主题系统](docs/themes.md) 和 [主题截图目录](docs/screenshots/themes/)。
+
+## 开发与检查
+
+| 命令 | 用途 |
+| --- | --- |
+| `bun run dev` | 启动完整桌面开发环境 |
+| `bun run dev:web` | 启动前端开发服务 |
+| `bun run generate` | 从 Go 服务生成 TypeScript 绑定 |
+| `bun run typecheck` | TypeScript 类型检查 |
+| `bun run checks` | TypeScript 类型检查与 `go vet ./...` |
+| `bun run build:web` | 检查并构建前端到 `dist/` |
+| `bun run test:previews` | 运行 HTML / Markdown 预览浏览器回归 |
+
+浏览器回归会启动临时 Vite 服务和独立的无界面 Chrome，使用合成数据验证 JSON 转义解码、表格样式、两轮实际轮询后的格式及滚动位置，以及键、数据库、连接切换；无需连接 Redis。
+
+```bash
+# 运行回归，同时保存 HTML / Markdown 截图
+node scripts/test-value-preview.mjs .shots/preview-fix
+
+# 使用其他 Chromium 可执行文件
+CHROME_BIN="/path/to/chromium" bun run test:previews
+
+# 重新生成主题截图，写入 docs/screenshots/themes/
+node scripts/shoot-themes.mjs
+```
+
+`src/mygo.ts` 是生成文件。修改 Go 服务接口后运行 `bun run generate`，不要直接修改绑定代码。
+
+## macOS 构建
+
+```bash
+# 当前机器架构的 .app 与 .dmg
+bun run package:mac
+
+# Intel / Apple Silicon 通用构建
+bun run package:mac:universal
+
+# 仅生成应用，不制作磁盘映像
+./scripts/build.sh mac --skip-dmg
+```
+
+Apple Silicon 构建产物位于：
+
+```text
+build/darwin-arm64/
+├── redis-manager.app
+└── redis-manager-0.1.0-arm64.dmg
+```
+
+版本来自 [mygo.config.ts](mygo.config.ts)。应用图标使用 [resources/icon.png](resources/icon.png)，MyGo 会自动将它转换为桌面图标资源。
+构建完成后可直接打开 `.app`，或将其复制到「应用程序」。
+
+构建脚本默认清理 `build/` 与 `dist/`，随后运行检查、构建前端、编译并打包应用。常用参数如下：
+
+| 参数 | 用途 |
+| --- | --- |
+| `--arch arm64\|amd64\|universal` | 指定 macOS 架构 |
+| `--skip-dmg` | 跳过 DMG；环境无法创建磁盘映像时也会自动跳过 |
+| `--no-clean` | 保留已有构建目录 |
+| `--no-checks` | 跳过脚本的独立检查步骤，前端构建仍会执行类型检查 |
+| `--sign <identity>` | 指定 macOS 签名身份 |
+
+当前已验证 macOS arm64 构建；通用构建是脚本提供的选项，其他架构及平台尚未完成运行验收。
+`bun run package:web` 可调用 MyGo 的 Web 构建目标，该目标的 Redis 连接能力尚未验证。
+
+## 快捷键
+
+| 快捷键 | 操作 |
+| --- | --- |
+| `⌘K` | 打开命令面板 |
+| `⌘,` | 打开设置 |
+| `⌘T` | 新建 CLI 会话 |
+| `⌘R` | 刷新总览指标 |
+| `⌘L` | 清空当前 CLI 输出 |
+| `⌘1` / `⌘2` / `⌘3` / `⌘4` | 总览 / 键浏览 / CLI / 监控 |
+| `↑` / `↓` | 在 CLI 输入框中切换历史命令 |
+| `Tab` | 在 CLI 输入框中补全命令名 |
+| `Esc` | 关闭命令面板、菜单或弹窗 |
+
+代码同时识别 `Ctrl` 作为组合键修饰键。
+
+## 数据存储
+
+- **连接配置**：macOS 路径为 `~/Library/Application Support/Redis Manager/connections.json`。
+- **密码**：优先使用 MyGo 系统凭据存储；不可用时回退到权限为 `0600` 的连接配置文件。
+- **界面偏好**：主题、SCAN 参数和 CLI 默认只读等设置保存在 WebView 的 `localStorage`。
+- **CLI 会话与历史**：保存在本次应用运行的内存中，重启后不会恢复。
+
+删除已保存连接会删除对应的本地配置和密码凭据；键删除则会操作当前连接的 Redis 数据。
+
+## 当前限制
+
+- **写入范围**：界面支持 Hash 字段写入和键删除，尚未提供所有数据类型的完整编辑器。
+- **只读模式**：CLI 通过内置命令列表拦截部分写命令；它不是完整的权限控制，也不约束界面的 Hash 写入和键删除。需要限制服务器写入时，应使用 Redis ACL。`KEYS` 始终被 CLI 拦截。
+- **大值读取**：设置中的值上限主要影响前端渲染。String、Hash、Set、Stream 仍可能从服务器完整读取；List / ZSet 最多读取前 5000 项。原始 / HTML / MD 最多渲染 200,000 个字符，Hex 使用前 4096 个源字符，JSON 格式化结果没有同样的截断处理。
+- **Cluster 浏览**：已有 Cluster 连接路径，但 SCAN 和指标尚未实现逐主节点遍历与全局聚合，不能将结果视为整个集群的完整数据。
+- **功能阶段**：SSH 隧道、应用锁屏及更完整的类型编辑等仍属于后续功能；历史设计文档中的功能清单可能包含这些规划。
+
+## 项目结构
 
 | 路径 | 作用 |
-|---|---|
-| `main.go` | MyGo 窗口、Redis 服务与 typed bindings 来源 |
-| `src/main.ts` | 前端入口（样式装配、绑定注入、按需加载预览数据） |
-| `src/app.ts` | 渲染循环、事件委托、快捷键、连接编辑器 |
-| `src/core/` | 状态 store、Go 绑定封装、格式化、图标、SVG 图表 |
-| `src/ui/` | 壳层（顶栏/侧栏/页签/状态栏/命令面板）与小组件、告警推导 |
-| `src/views/` | 总览 / 键浏览 / CLI / 监控 / 连接 / 设置 |
-| `src/theme/` | 主题清单与设置存储 |
-| `src/styles/` | token 契约与四套主题、基础样式、组件、页面布局 |
-| `src/mygo.ts` | MyGo 自动生成的 TypeScript 客户端 |
-| `scripts/` | 预览假数据、headless 截图脚本 |
-| `docs/ui-prototype.md` | 信息架构、交互约定与 Go 接口建议 |
-| `docs/themes.md` | 主题系统说明（token、结构轴、如何新增主题） |
-| `prototype/` | 早期静态 HTML 原型，仅作设计参考，不参与构建 |
+| --- | --- |
+| `main.go` | MyGo 入口、Redis 服务、连接与凭据管理 |
+| `src/app.ts` | 渲染、事件、快捷键及连接编辑交互 |
+| `src/core/` | 状态、Go API 封装、格式与预览渲染、图表 |
+| `src/views/` / `src/ui/` | 各页面与共享界面组件 |
+| `src/theme/` / `src/styles/` | 主题、偏好与样式 |
+| `src/mygo.ts` | 自动生成的 Go 服务绑定 |
+| `resources/icon.png` | 应用图标 |
+| `scripts/` | 构建、演示数据、浏览器回归及截图工具 |
+| `docs/` | 主题说明、截图与设计记录 |
+| `prototype/` | 早期静态界面原型，不参与应用构建 |
 
-## 截图
+技术栈：Go、MyGo 0.7.4、go-redis v9、TypeScript、Vite；前端采用原生 DOM 渲染。
 
-```bash
-node scripts/shoot-themes.mjs   # 构建 + vite preview + headless Chrome，输出到 docs/screenshots/themes/
-```
+文档入口：[主题系统](docs/themes.md) · [文档索引](docs/README.md) · [早期 UI 设计说明](docs/ui-prototype.md) · [历史风格对比](docs/styles.md)
