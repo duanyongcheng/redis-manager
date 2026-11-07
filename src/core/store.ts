@@ -61,6 +61,8 @@ export interface ViewState {
   /** Page for each connection so switching servers keeps the last tab. */
   pageByConn: Record<string, PageId>;
   connId: string | null;
+  /** The database currently being viewed for each connection. */
+  dbByConn: Record<string, number>;
   connections: ConnectionView[];
   loadingConnections: boolean;
   globalError: string;
@@ -102,6 +104,7 @@ export const state: ViewState = {
   page: "overview",
   pageByConn: {},
   connId: null,
+  dbByConn: {},
   connections: [],
   loadingConnections: false,
   globalError: "",
@@ -178,6 +181,25 @@ export function confirmDialog(options: { title: string; body: string; confirmLab
 
 export function currentConnection(): ConnectionView | null {
   return state.connections.find((c) => c.id === state.connId) ?? state.connections[0] ?? null;
+}
+
+export function currentDb(conn: ConnectionView | null = currentConnection()): number {
+  if (!conn) return 0;
+  if (conn.mode.toLowerCase() === "cluster") return 0;
+  const selected = state.dbByConn[conn.id];
+  if (typeof selected === "number" && Number.isInteger(selected) && selected >= 0) return selected;
+  return Number.isInteger(conn.db) && conn.db >= 0 ? conn.db : 0;
+}
+
+export function availableDatabases(conn: ConnectionView | null = currentConnection()): number[] {
+  if (!conn) return [];
+  if (conn.mode.toLowerCase() === "cluster") return [0];
+  const values = new Set<number>(Array.from({ length: 16 }, (_, db) => db));
+  values.add(currentDb(conn));
+  for (const keyspace of state.overview[conn.id]?.keyspaces ?? []) {
+    if (Number.isInteger(keyspace.db) && keyspace.db >= 0) values.add(keyspace.db);
+  }
+  return [...values].sort((a, b) => a - b);
 }
 
 export function currentOverview(): OverviewSnapshot | null {
@@ -295,8 +317,10 @@ function pushSample(connId: string, overview: OverviewSnapshot, netIn: number, n
 export async function loadOverview(): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return;
+  const db = currentDb(conn);
   try {
-    const overview = await redis.getOverview(conn.id, conn.db);
+    const overview = await redis.getOverview(conn.id, db);
+    if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
     const prevInfo = state.overview[conn.id]?.info;
     const netIn = diff(overview.info["total_net_input_bytes"], prevInfo?.["total_net_input_bytes"]);
     const netOut = diff(overview.info["total_net_output_bytes"], prevInfo?.["total_net_output_bytes"]);
@@ -328,8 +352,10 @@ function updateConn(id: string, partial: Partial<ConnectionView>) {
 export async function loadMonitor(): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return;
+  const db = currentDb(conn);
   try {
-    const snapshot = await redis.getMonitorSnapshot(conn.id, conn.db);
+    const snapshot = await redis.getMonitorSnapshot(conn.id, db);
+    if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
     state.monitor[conn.id] = snapshot;
     const prevInfo = state.overview[conn.id]?.info;
     state.overview[conn.id] = snapshot.overview;
@@ -357,6 +383,33 @@ export async function selectConnection(id: string) {
   if (state.page === "monitor") void loadMonitor();
 }
 
+export async function selectDatabase(db: number) {
+  const conn = currentConnection();
+  const next = Math.trunc(db);
+  if (!conn || !Number.isFinite(next) || next < 0 || (conn.mode.toLowerCase() === "cluster" && next !== 0)) return;
+  if (currentDb(conn) === next) return;
+  state.dbByConn = { ...state.dbByConn, [conn.id]: next };
+  state.selectedKey = null;
+  state.value = null;
+  state.valueLoading = false;
+  state.valueError = "";
+  state.keys = [];
+  state.keyDone = false;
+  state.keyCursor = 0;
+  state.keyScanned = 0;
+  state.scanning = false;
+  delete state.overview[conn.id];
+  delete state.monitor[conn.id];
+  delete state.history[conn.id];
+  delete state.cliSessions[conn.id];
+  delete state.cliActive[conn.id];
+  notify();
+  await loadOverview();
+  if (currentConnection()?.id !== conn.id || currentDb(conn) !== next) return;
+  if (state.page === "browser") void scanKeys({ reset: true });
+  if (state.page === "monitor") void loadMonitor();
+}
+
 export async function testConnection(conn: ConnectionView) {
   if (!api.available) return;
   try {
@@ -377,6 +430,7 @@ export async function testConnection(conn: ConnectionView) {
 export async function scanKeys(options: { reset?: boolean; append?: boolean } = {}): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available || state.scanning) return;
+  const db = currentDb(conn);
   const reset = options.reset || !options.append;
   state.scanning = true;
   if (reset) {
@@ -387,7 +441,8 @@ export async function scanKeys(options: { reset?: boolean; append?: boolean } = 
   notify();
   try {
     const count = settings.get("scanCount");
-    const page: KeyPage = await redis.scanKeys(conn.id, conn.db, state.keyPattern || "*", reset ? 0 : state.keyCursor, count);
+    const page: KeyPage = await redis.scanKeys(conn.id, db, state.keyPattern || "*", reset ? 0 : state.keyCursor, count);
+    if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
     const seen = new Set(state.keys.map((k) => k.key));
     const merged = [...(state.keys ?? []), ...(page.keys ?? []).filter((k) => !seen.has(k.key))];
     state.keys = merged.slice(0, 2000);
@@ -411,13 +466,14 @@ export async function scanKeys(options: { reset?: boolean; append?: boolean } = 
 export async function openKey(key: string): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return;
+  const db = currentDb(conn);
   state.selectedKey = key;
   state.valueLoading = true;
   state.valueError = "";
   notify();
   try {
-    const value = await redis.getValue(conn.id, key);
-    if (state.selectedKey !== key) return;
+    const value = await redis.getValue(conn.id, db, key);
+    if (state.selectedKey !== key || currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
     state.value = value;
   } catch (error) {
     state.valueError = errorMessage(error);
@@ -432,8 +488,9 @@ export async function deleteSelectedKey(): Promise<void> {
   const conn = currentConnection();
   const value = state.value;
   if (!conn || !value) return;
+  const db = currentDb(conn);
   try {
-    await redis.deleteKey(conn.id, value.key);
+    await redis.deleteKey(conn.id, db, value.key);
     toast("ok", `已删除 ${value.key}`);
     state.value = null;
     state.selectedKey = null;
@@ -449,8 +506,9 @@ export async function saveHashField(field: string, value: string): Promise<boole
   const conn = currentConnection();
   const current = state.value;
   if (!conn || !current) return false;
+  const db = currentDb(conn);
   try {
-    await redis.hashSet(conn.id, current.key, field, value);
+    await redis.hashSet(conn.id, db, current.key, field, value);
     state.value = { ...current, hash: { ...(current.hash ?? {}), [field]: value } };
     notify();
     toast("ok", "字段已写入", `${current.key} · ${field}`);
@@ -465,6 +523,7 @@ export async function runCli(command: string): Promise<void> {
   const conn = currentConnection();
   const session = activeCliSession();
   if (!conn || !session) return;
+  const db = currentDb(conn);
   const text = command.trim();
   if (!text) return;
   const entry = { id: Date.now(), at: Date.now(), command: text, lines: [] as CliLine[], readOnly: session.readOnly };
@@ -477,7 +536,7 @@ export async function runCli(command: string): Promise<void> {
     return;
   }
   try {
-    const result = await redis.execCLI(conn.id, conn.db, text, session.readOnly);
+    const result = await redis.execCLI(conn.id, db, text, session.readOnly);
     entry.lines = result.lines ?? [];
     if (!entry.lines.length) entry.lines = [{ kind: "string", text: "(empty)" }];
   } catch (error) {

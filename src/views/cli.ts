@@ -1,12 +1,13 @@
 import { icon } from "../core/icons";
 import { connAddress, esc } from "../core/format";
-import { activeCliSession, cliSessionsFor, currentConnection, type CliSession, type ViewState } from "../core/store";
+import { activeCliSession, cliSessionsFor, currentConnection, currentDb, type CliSession, type ViewState } from "../core/store";
 import { settings } from "../theme/settings";
 import { emptyState } from "../ui/kit";
 
 export function cliView(s: ViewState): string {
   const conn = currentConnection();
   if (!conn) return emptyState("还没有连接", "CLI 需要先选择一个连接。", { label: "新建连接", action: "new-connection" });
+  const db = currentDb(conn);
   const sessions = cliSessionsFor(conn);
   const active = activeCliSession();
   if (!active) return "";
@@ -30,7 +31,7 @@ export function cliView(s: ViewState): string {
     <div class="cli-term scroll" id="cli-log">${logHtml(active, conn)}</div>
     <div class="cli-suggest">${suggestions(active)}</div>
     <form class="cli-prompt" id="cli-form">
-      <span class="prompt mono">${esc(connAddress(conn))}[${conn.db}]&gt;</span>
+      <span class="prompt mono">${esc(connAddress(conn))}[${db}]&gt;</span>
       <input id="cli-input" class="mono" placeholder="输入命令，Enter 执行，↑↓ 历史" autocomplete="off" spellcheck="false" />
       <button class="btn primary sm" type="submit">${icon("play", 11)} 执行</button>
     </form>
@@ -38,16 +39,17 @@ export function cliView(s: ViewState): string {
 }
 
 function logHtml(session: CliSession, conn: NonNullable<ReturnType<typeof currentConnection>>): string {
+  const db = currentDb(conn);
   if (!session.lines.length) {
     return `<div class="cli-welcome">
-      <div class="dim">Redis Manager CLI · ${esc(connAddress(conn))}/db${conn.db}</div>
+      <div class="dim">Redis Manager CLI · ${esc(connAddress(conn))}/db${db}</div>
       <div class="faint">已连接 ${esc(conn.name)}。当前为${session.readOnly ? "只读" : "可写"}模式，↑/↓ 浏览历史，⌘K 清屏。</div>
       <div class="faint">试试 <span class="acc">INFO server</span>、<span class="acc">DBSIZE</span> 或 <span class="acc">SCAN 0 COUNT 10</span>。</div>
     </div>`;
   }
   return session.lines
     .map((entry) => {
-      const prompt = `<div class="cli-cmd mono"><span class="prompt">${esc(connAddress(conn))}[${conn.db}]&gt;</span> <span>${esc(entry.command ?? "")}</span></div>`;
+      const prompt = `<div class="cli-cmd mono"><span class="prompt">${esc(connAddress(conn))}[${db}]&gt;</span> <span>${esc(entry.command ?? "")}</span></div>`;
       const out = (entry.lines ?? [])
         .map((line) => `<div class="cli-line ${esc(line.kind)} mono">${esc(line.text)}</div>`)
         .join("");

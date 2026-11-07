@@ -66,9 +66,9 @@ export const redis = {
   getMonitorSnapshot: (id: string, db: number): Promise<MonitorSnapshot> => svc().getMonitorSnapshot(id, db),
   scanKeys: (id: string, db: number, pattern: string, cursor: number, count: number): Promise<KeyPage> =>
     svc().scanKeys(id, db, pattern, cursor, count),
-  getValue: (id: string, key: string): Promise<RedisValue> => svc().getValue(id, key),
-  deleteKey: (id: string, key: string): Promise<void> => svc().deleteKey(id, key),
-  hashSet: (id: string, key: string, field: string, value: string): Promise<void> => svc().hashSet(id, key, field, value),
+  getValue: (id: string, db: number, key: string): Promise<RedisValue> => svc().getValue(id, db, key),
+  deleteKey: (id: string, db: number, key: string): Promise<void> => svc().deleteKey(id, db, key),
+  hashSet: (id: string, db: number, key: string, field: string, value: string): Promise<void> => svc().hashSet(id, db, key, field, value),
   execCLI: (id: string, db: number, line: string, readOnly: boolean): Promise<CLIResult> => svc().execCLI(id, db, line, readOnly),
 };
 

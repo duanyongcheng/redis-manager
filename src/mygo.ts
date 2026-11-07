@@ -173,8 +173,8 @@ export const RedisService = {
     return call("RedisService.DeleteConnection", id);
   },
   /** DeleteKey deletes one key after the frontend's confirmation step. */
-  deleteKey(connID: string, key: string): Promise<void> {
-    return call("RedisService.DeleteKey", connID, key);
+  deleteKey(connID: string, db: number, key: string): Promise<void> {
+    return call("RedisService.DeleteKey", connID, db, key);
   },
   /** ExecCLI executes one command and returns terminal-friendly output lines. */
   execCLI(connID: string, db: number, line: string, readOnly: boolean): Promise<CLIResult> {
@@ -193,12 +193,12 @@ export const RedisService = {
     return call("RedisService.GetOverview", connID, db);
   },
   /** GetValue reads a key and returns a type-specific value representation. */
-  getValue(connID: string, key: string): Promise<RedisValue> {
-    return call("RedisService.GetValue", connID, key);
+  getValue(connID: string, db: number, key: string): Promise<RedisValue> {
+    return call("RedisService.GetValue", connID, db, key);
   },
   /** HashSet sets one field in a hash. */
-  hashSet(connID: string, key: string, field: string, value: string): Promise<void> {
-    return call("RedisService.HashSet", connID, key, field, value);
+  hashSet(connID: string, db: number, key: string, field: string, value: string): Promise<void> {
+    return call("RedisService.HashSet", connID, db, key, field, value);
   },
   /** ListConnections returns saved connections without credentials. */
   listConnections(): Promise<Connection[]> {

@@ -1,6 +1,6 @@
 import { icon } from "../core/icons";
 import { connAddress, esc, modeLabel, num } from "../core/format";
-import { currentConnection, currentHistory, type ConnectionView, type PageId, type ViewState } from "../core/store";
+import { availableDatabases, currentConnection, currentDb, currentHistory, type ConnectionView, type PageId, type ViewState } from "../core/store";
 import { settings } from "../theme/settings";
 import { themeMeta } from "../theme/themes";
 
@@ -102,11 +102,12 @@ export function sidebar(s: ViewState): string {
 }
 
 function connRow(conn: ConnectionView, active: boolean): string {
-  return `<button class="conn ${active ? "selected" : ""}" data-conn="${esc(conn.id)}" title="${esc(`${conn.name} · ${connAddress(conn)}/db${conn.db}`)}">
+  const db = active ? currentDb(conn) : conn.db;
+  return `<button class="conn ${active ? "selected" : ""}" data-conn="${esc(conn.id)}" title="${esc(`${conn.name} · ${connAddress(conn)}/db${db}`)}">
     <span class="status-dot ${conn.status}"></span>
     <span class="conn-main">
       <span class="conn-name">${esc(conn.name || connAddress(conn))}${conn.readOnly ? `<span class="faint" title="只读">${icon("lock", 10)}</span>` : ""}</span>
-      <span class="conn-sub">${esc(connAddress(conn))}<span class="faint">/db${conn.db}</span></span>
+      <span class="conn-sub">${esc(connAddress(conn))}<span class="faint">/db${db}</span></span>
     </span>
     <span class="conn-ver">${esc(conn.version || "—")}</span>
   </button>`;
@@ -134,6 +135,27 @@ export function tabs(s: ViewState): string {
   </nav>`;
 }
 
+export function dataContext(s: ViewState): string {
+  const conn = currentConnection();
+  if (!conn || s.page === "connections" || s.page === "settings") return `<div class="data-context data-context-empty" aria-hidden="true"></div>`;
+  const db = currentDb(conn);
+  const keyspaces = new Map((s.overview[conn.id]?.keyspaces ?? []).map((item) => [item.db, item.keys]));
+  const connectionOptions = s.connections
+    .map((item) => `<option value="${esc(item.id)}" ${item.id === conn.id ? "selected" : ""}>${esc(item.name || connAddress(item))} · ${esc(connAddress(item))}</option>`)
+    .join("");
+  const databaseOptions = availableDatabases(conn)
+    .map((item) => `<option value="${item}" ${item === db ? "selected" : ""}>DB ${item}${keyspaces.has(item) ? ` · ${num(keyspaces.get(item) ?? 0)} keys` : ""}</option>`)
+    .join("");
+  return `<div class="data-context" aria-label="当前数据源">
+    <span class="data-context-label">数据源</span>
+    <select class="select data-context-connection" data-connection-select aria-label="选择 Redis 连接">${connectionOptions}</select>
+    <span class="data-context-address mono">${esc(connAddress(conn))}</span>
+    <span class="data-context-divider"></span>
+    <label class="data-context-db"><span>数据库</span><select class="select" data-db-select aria-label="选择 Redis 数据库">${databaseOptions}</select></label>
+    <span class="data-context-mode">${esc(modeLabel(conn.mode))}</span>
+  </div>`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Status bar                                                          */
 /* ------------------------------------------------------------------ */
@@ -151,7 +173,7 @@ export function statusbar(s: ViewState): string {
     <span class="sb-sep">│</span>
     <span class="sb-item"><span class="sb-key">ping</span> <b>${last ? `${last.latency.toFixed(1)} ms` : "—"}</b></span>
     <span class="sb-spacer"></span>
-    ${conn ? `<span class="sb-item"><span class="sb-key">db</span> <b>${conn.db}</b></span><span class="sb-sep">│</span>` : ""}
+    ${conn ? `<span class="sb-item"><span class="sb-key">db</span> <b>${currentDb(conn)}</b></span><span class="sb-sep">│</span>` : ""}
     <span class="sb-item"><span class="sb-key">ops</span> <b>${num(last?.ops ?? 0)}</b></span>
     <span class="sb-sep">│</span>
     <span class="sb-item"><span class="sb-key">clients</span> <b>${num(last?.clients ?? 0)}</b></span>

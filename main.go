@@ -387,8 +387,8 @@ func (s *RedisService) ScanKeys(connID string, db int, pattern string, cursor ui
 }
 
 // GetValue reads a key and returns a type-specific value representation.
-func (s *RedisService) GetValue(connID, key string) (RedisValue, error) {
-	client, err := s.clientFor(connID, -1)
+func (s *RedisService) GetValue(connID string, db int, key string) (RedisValue, error) {
+	client, err := s.clientFor(connID, db)
 	if err != nil {
 		return RedisValue{}, err
 	}
@@ -443,8 +443,8 @@ func (s *RedisService) GetValue(connID, key string) (RedisValue, error) {
 }
 
 // DeleteKey deletes one key after the frontend's confirmation step.
-func (s *RedisService) DeleteKey(connID, key string) error {
-	client, err := s.clientFor(connID, -1)
+func (s *RedisService) DeleteKey(connID string, db int, key string) error {
+	client, err := s.clientFor(connID, db)
 	if err != nil {
 		return err
 	}
@@ -454,11 +454,11 @@ func (s *RedisService) DeleteKey(connID, key string) error {
 }
 
 // HashSet sets one field in a hash.
-func (s *RedisService) HashSet(connID, key, field, value string) error {
+func (s *RedisService) HashSet(connID string, db int, key, field, value string) error {
 	if field == "" {
 		return errors.New("hash field is required")
 	}
-	client, err := s.clientFor(connID, -1)
+	client, err := s.clientFor(connID, db)
 	if err != nil {
 		return err
 	}

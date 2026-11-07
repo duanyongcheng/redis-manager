@@ -1,7 +1,7 @@
 import { icon } from "../core/icons";
 import { connAddress, esc, modeLabel, ms } from "../core/format";
 import { type Connection } from "../core/api";
-import { currentConnection, type ViewState } from "../core/store";
+import { currentConnection, currentDb, type ViewState } from "../core/store";
 import { btn, card, emptyState } from "../ui/kit";
 
 export function connectionsView(s: ViewState): string {
@@ -20,7 +20,7 @@ export function connectionsView(s: ViewState): string {
           <span class="spacer"></span>
           <span class="badge">${esc(modeLabel(c.mode))}</span>
         </div>
-        <div class="conn-card-addr mono">${esc(connAddress(c))}<span class="faint">/db${c.db}</span></div>
+        <div class="conn-card-addr mono">${esc(connAddress(c))}<span class="faint">/db${active?.id === c.id ? currentDb(c) : c.db}</span></div>
         <div class="conn-card-meta">
           <span><span class="label">分组</span> ${esc(c.group || "未分组")}</span>
           <span><span class="label">版本</span> <b class="mono">${esc(c.version || "—")}</b></span>

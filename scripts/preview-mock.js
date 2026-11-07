@@ -126,7 +126,7 @@
       const list = pattern && pattern !== "*" ? keyMeta.filter((k) => k.key.startsWith(pattern.replace(/\*$/, ""))) : keyMeta;
       return { keys: list, cursor: 10240, done: true };
     },
-    getValue: async (_id, key) => ({
+    getValue: async (_id, _db, key) => ({
       key, type: key.startsWith("user:") ? "hash" : key === "leaderboard" ? "zset" : "string",
       ttlMs: 28800_000, sizeBytes: 486, encoding: "listpack",
       stringValue: key === "leaderboard" ? "" : '{"home":{"feed":["sku:88","sku:91"]},"updated":"2026-11-06T02:11:03Z"}',

@@ -22,6 +22,7 @@ import {
   saveHashField,
   scanKeys,
   selectConnection,
+  selectDatabase,
   setCliReadOnly,
   startPolling,
   state,
@@ -39,7 +40,7 @@ import { connectionsView, connectionDialog, editorDraft, type EditorDraft } from
 import { monitorView } from "./views/monitor";
 import { overviewView, setWindowSize } from "./views/overview";
 import { settingsView } from "./views/settings";
-import { confirmModal, palette, paletteList, sidebar, statusbar, tabs, toasts, topbar } from "./ui/shell";
+import { confirmModal, dataContext, palette, paletteList, sidebar, statusbar, tabs, toasts, topbar } from "./ui/shell";
 
 interface LocalUi {
   windowSize: number;
@@ -102,6 +103,7 @@ function render() {
         ${sidebar(s)}
         <main class="main">
           ${tabs(s)}
+          ${dataContext(s)}
           <div class="content" data-page="${s.page}">${s.serviceAvailable ? "" : serviceBanner()}${pageBody(s)}</div>
         </main>
       </div>
@@ -609,6 +611,14 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
+  if (target.dataset.connectionSelect != null) {
+    void selectConnection(target.value);
+    return;
+  }
+  if (target.dataset.dbSelect != null) {
+    void selectDatabase(Number(target.value));
+    return;
+  }
   const key = target.dataset.setting;
   if (!key) return;
   if (key === "scanCount" || key === "cliHistoryLimit" || key === "maxValueBytes") {
