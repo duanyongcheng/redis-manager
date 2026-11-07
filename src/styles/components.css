@@ -8,8 +8,9 @@
   grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--statusbar-h);
   height: 100vh;
   background: var(--bg);
-  animation: app-in var(--dur) var(--ease);
 }
+
+.app-enter { animation: app-in var(--dur) var(--ease); }
 
 @keyframes app-in {
   from { opacity: 0; }

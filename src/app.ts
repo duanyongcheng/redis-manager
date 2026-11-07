@@ -67,6 +67,7 @@ const PAGE_VIEWS: Record<PageId, (s: ViewState) => string> = {
 
 let lastKey = "";
 let scrollMemo: Record<string, number> = {};
+let hasPaintedApp = false;
 
 function pageBody(s: ViewState): string {
   const view = PAGE_VIEWS[s.page] ?? overviewView;
@@ -95,7 +96,7 @@ function render() {
   lastKey = signature;
 
   const html = `
-    <div class="app">
+    <div class="app${hasPaintedApp ? "" : " app-enter"}">
       ${topbar(s)}
       <div class="workarea">
         ${sidebar(s)}
@@ -113,6 +114,7 @@ function render() {
     ${toasts(s)}`;
 
   root.innerHTML = html;
+  hasPaintedApp = true;
   document.title = conn ? `Redis Manager — ${conn.name || conn.host}` : "Redis Manager";
 
   // restore scrolls
