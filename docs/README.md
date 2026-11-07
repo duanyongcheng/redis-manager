@@ -1,16 +1,21 @@
 # Redis Manager
 
-Go + [MyGo](https://github.com/egoist/mygo) 实现的 Redis 桌面管理工具（规划中）。
+Go + [MyGo](https://github.com/egoist/mygo) 实现的 Redis 桌面管理工具。
 
-当前阶段：**UI 原型**。
+当前阶段：**macOS 首个可运行版本**。前端已重写为「一套页面 + 四套主题」的结构（Console / Terminal / Craft / Airy），
+Go 侧提供连接保存、测试、SCAN、值读取、CLI 和指标服务。
 
 | 文档 | 内容 |
 |---|---|
-| [风格选择页](../prototype/styles/index.html) | 四种风格原型入口（Terminal / Craft / Console / Airy） |
-| [四套风格对比](styles.md) | 每套风格的视觉语言、结构、独有元素、优缺点与实现成本 |
+| [主题系统](themes.md) | 现行实现：token 契约、结构轴、四套主题截图、如何新增主题 |
+| [主题截图](screenshots/themes/) | 四套主题在实际应用中的截图 |
+| [风格选择页](../prototype/styles/index.html) | 早期静态原型入口（设计参考，不参与构建） |
+| [四套风格对比](styles.md) | 早期原型的视觉语言与取舍记录 |
 | [UI 原型设计说明](ui-prototype.md) | MyGo 两种界面形态对比与选型、信息架构、视觉规范、各页面设计、交互约定、Go 代码结构建议、安全与性能要点 |
 | [主原型](../prototype/index.html) | 第 1 版高保真原型，深/浅色可切换 |
 | [设计稿截图](screenshots/) | 各页面截图；四套风格在 `screenshots/styles/` |
+
+构建和 macOS 打包说明见仓库根目录 [README.md](../README.md)。
 
 ## 功能范围（原型已覆盖）
 

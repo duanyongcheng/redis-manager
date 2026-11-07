@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Redis Manager · 主题</title>
+<style>
+  :root { --fg:#e9ecf2; --fg-2:#a3aabc; --fg-3:#6b7186; --line:rgba(255,255,255,.08); }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    color: var(--fg); min-height: 100vh; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(1000px 600px at 10% -10%, rgba(139,124,255,.18), transparent 60%),
+      radial-gradient(900px 600px at 95% 0%, rgba(255,126,182,.12), transparent 60%),
+      #0a0b10;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 56px 32px 40px; }
+  .head { max-width: 760px; margin-bottom: 34px; }
+  .eyebrow { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 10px; }
+  h1 { font-size: 34px; font-weight: 700; letter-spacing: -.8px; margin-bottom: 12px; }
+  .head p { color: var(--fg-2); font-size: 13.5px; line-height: 1.75; }
+  code { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; background: rgba(255,255,255,.06); border-radius: 5px; padding: 1px 6px; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .card { border-radius: 20px; background: rgba(255,255,255,.035); border: 1px solid var(--line); overflow: hidden; }
+  .shot { aspect-ratio: 16/10; overflow: hidden; border-bottom: 1px solid var(--line); background: #0d0f16; }
+  .shot img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+  .info { padding: 18px 20px 20px; }
+  .tag { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-3); }
+  .info h2 { font-size: 20px; font-weight: 680; letter-spacing: -.3px; margin: 2px 0 6px; }
+  .info p { color: var(--fg-2); font-size: 12.5px; line-height: 1.7; margin-bottom: 12px; }
+  .thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .thumbs a { display: block; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); line-height: 0; }
+  .thumbs img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+  .foot { margin-top: 34px; color: var(--fg-3); font-size: 12px; line-height: 1.8; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .wrap { padding: 32px 18px; } h1 { font-size: 26px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="eyebrow">Redis Manager · 主题</div>
+    <h1>一套界面，四种语言</h1>
+    <p>同一套信息架构、同一套 Go 服务，四套主题只通过设计 token 与结构轴（页签形态、数据类型标签、进度条、侧栏、窗口）改变视觉语言。截图为应用真实渲染，数据来自 <code>?preview=1</code> 的演示夹具。</p>
+  </div>
+  <div class="grid">
+    <section class="card">
+      <div class="shot"><a href="console-dark-overview.png"><img src="console-dark-overview.png" alt="Console 总览" /></a></div>
+      <div class="info">
+        <div class="tag">C · Data console</div>
+        <h2>Console</h2>
+        <p>深色高密度仪表盘，珊瑚色点缀，等宽数字，常驻上下文条与 ⌘K 命令面板。最适合需要一屏看尽指标的后端与 DBA。</p>
+        <div class="thumbs">
+          <a href="console-dark-browser.png"><img src="console-dark-browser.png" alt="键浏览" /></a>
+          <a href="console-dark-cli.png"><img src="console-dark-cli.png" alt="CLI" /></a>
+          <a href="console-dark-monitor.png"><img src="console-dark-monitor.png" alt="监控" /></a>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="shot"><a href="terminal-dark-overview.png"><img src="terminal-dark-overview.png" alt="Terminal 总览" /></a></div>
+      <div class="info">
+        <div class="tag">A · Terminal</div>
+        <h2>Terminal</h2>
+        <p>全等宽字体、琥珀荧光、ASCII 方框与 <code>█░</code> 进度条，0 圆角。对 redis-cli 用户零学习成本。</p>
+        <div class="thumbs">
+          <a href="terminal-dark-browser.png"><img src="terminal-dark-browser.png" alt="键浏览" /></a>
+          <a href="terminal-dark-cli.png"><img src="terminal-dark-cli.png" alt="CLI" /></a>
+          <a href="craft-dark-cli.png"><img src="craft-dark-cli.png" alt="Craft 深色 CLI" /></a>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="shot"><a href="craft-light-overview.png"><img src="craft-light-overview.png" alt="Craft 总览" /></a></div>
+      <div class="info">
+        <div class="tag">B · Craft</div>
+        <h2>Craft</h2>
+        <p>暖纸色底、衬线标题、1px 细线与大留白，KPI 由卡片变成编辑式分栏。长时间阅读最不累。</p>
+        <div class="thumbs">
+          <a href="craft-light-browser.png"><img src="craft-light-browser.png" alt="键浏览" /></a>
+          <a href="craft-dark-cli.png"><img src="craft-dark-cli.png" alt="深色 CLI" /></a>
+          <a href="craft-light-settings-dialog.png"><img src="craft-light-settings-dialog.png" alt="设置与新建连接" /></a>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="shot"><a href="airy-dark-overview.png"><img src="airy-dark-overview.png" alt="Airy 总览" /></a></div>
+      <div class="info">
+        <div class="tag">D · Airy</div>
+        <h2>Airy</h2>
+        <p>桌面壁纸上的悬浮圆角窗口、毛玻璃侧栏、紫粉渐变与柔和光晕。第一眼最友好，适合面向更多开发者的版本。</p>
+        <div class="thumbs">
+          <a href="airy-dark-browser.png"><img src="airy-dark-browser.png" alt="键浏览" /></a>
+          <a href="airy-dark-monitor.png"><img src="airy-dark-monitor.png" alt="监控" /></a>
+          <a href="airy-dark-overview-dialog.png"><img src="airy-dark-overview-dialog.png" alt="⌘K 命令面板" /></a>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="foot">重新生成：<code>node scripts/shoot-themes.mjs</code> · 实现说明见 <code>docs/themes.md</code></div>
+</div>
+</body>
+</html>

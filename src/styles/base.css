@@ -1,0 +1,138 @@
+/* ==========================================================================
+   Base: reset, typography, scrollbars — all derived from theme tokens.
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--font-size);
+  line-height: var(--font-line);
+  font-weight: var(--font-weight);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+h1, h2, h3, h4, h5 {
+  margin: 0;
+  font-weight: var(--display-weight);
+  letter-spacing: var(--display-tracking);
+}
+
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  outline: none;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+ul, ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: var(--radius-pill);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:root[data-theme="terminal"] ::-webkit-scrollbar-thumb {
+  border-radius: 0;
+  border: 0;
+  background: var(--line-strong);
+}
+
+/* --- utilities --------------------------------------------------------- */
+.icon {
+  flex: none;
+  display: inline-block;
+  vertical-align: middle;
+}
+.mono { font-family: var(--font-mono); }
+.num { font-variant-numeric: var(--numbers); }
+.dim { color: var(--fg-2); }
+.faint { color: var(--fg-3); }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.err { color: var(--err); }
+.acc { color: var(--accent); }
+.grow { flex: 1; min-width: 0; }
+.row { display: flex; align-items: center; gap: var(--gap); }
+.col { display: flex; flex-direction: column; min-height: 0; }
+.nowrap { white-space: nowrap; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.label {
+  font-size: 10px;
+  letter-spacing: var(--label-tracking);
+  text-transform: var(--label-transform);
+  color: var(--fg-3);
+  font-weight: 600;
+}
+.scroll { overflow: auto; }
+.hidden { display: none !important; }
+
+/* Focus ring is themed, never the browser blue. */
+:focus-visible {
+  outline: 1px solid var(--line-focus);
+  outline-offset: 1px;
+}
+
+:root[data-theme="terminal"] :focus-visible {
+  outline-offset: 0;
+}
