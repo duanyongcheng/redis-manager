@@ -27,9 +27,17 @@ bun run dev          # MyGo 窗口 + Go 绑定 + Vite 开发服务器
 bun run dev:web      # 只启动浏览器预览（没有 Go 绑定，界面会提示服务不可用）
 bun run typecheck    # tsc --noEmit
 bun run build:web    # 构建前端到 dist/
+bun run test:previews # HTML / Markdown 预览浏览器回归（本机 Chrome，无需 Redis）
 ```
 
 浏览器里带 `?preview=1` 打开时会加载 `scripts/preview-mock.js` 的演示数据，用于截图与纯前端调试。
+
+String 值支持原始、JSON、Hex、HTML 和 Markdown 预览。预览会解开一层合法的 JSON 字符串包装，
+原始内容保持不变；HTML 保留文档自身样式，模板变量按原文展示。后台采样不会改变选中的格式或重建未变化的预览。
+
+`test:previews` 会启动临时 Vite 服务和独立的无界面 Chrome，验证两轮实际轮询后的格式、iframe 和滚动位置，
+以及转义解码、表格样式和连接切换。可通过 `CHROME_BIN` 指定 Chromium 路径，
+`bun run test:previews -- .shots/preview-fix` 还会输出 HTML / Markdown 截图。
 
 ## macOS 打包
 

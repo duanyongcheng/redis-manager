@@ -171,10 +171,190 @@ export function isJson(value: string | null | undefined): boolean {
   return safeJson(value).ok;
 }
 
+/** Decodes a Redis string that was stored as a JSON-quoted string. */
+export function decodeJsonString(value: string): { text: string; encoded: boolean } {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === "string" ? { text: parsed, encoded: true } : { text: value, encoded: false };
+  } catch {
+    return { text: value, encoded: false };
+  }
+}
+
 /** Truncates large payloads for the DOM; the full value stays in state. */
 export function clip(value: string, max = 4000): { text: string; truncated: boolean } {
   if (value.length <= max) return { text: value, truncated: false };
   return { text: value.slice(0, max), truncated: true };
+}
+
+/**
+ * Renders the common Markdown blocks used in stored notes and documents.
+ * The source is escaped before adding the small set of generated tags, so
+ * Markdown values cannot inject markup into the host application.
+ */
+export function markdownToHtml(value: string | null | undefined): string {
+  const lines = String(value ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const output: string[] = [];
+  let paragraph: string[] = [];
+  let listType: "ul" | "ol" | null = null;
+  let quote: string[] = [];
+  let code: string[] | null = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    output.push(`<p>${paragraph.map(markdownInline).join("<br />")}</p>`);
+    paragraph = [];
+  };
+  const closeList = () => {
+    if (!listType) return;
+    output.push(`</${listType}>`);
+    listType = null;
+  };
+  const flushQuote = () => {
+    if (!quote.length) return;
+    output.push(`<blockquote>${quote.map(markdownInline).join("<br />")}</blockquote>`);
+    quote = [];
+  };
+  const flushBlocks = () => {
+    flushParagraph();
+    closeList();
+    flushQuote();
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    const fence = line.match(/^\s*```\s*([\w-]*)\s*$/);
+    if (fence) {
+      if (code) {
+        const language = fence[1] ? ` class="language-${esc(fence[1])}"` : "";
+        output.push(`<pre><code${language}>${esc(code.join("\n"))}</code></pre>`);
+        code = null;
+      } else {
+        flushBlocks();
+        code = [];
+      }
+      continue;
+    }
+    if (code) {
+      code.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushBlocks();
+      continue;
+    }
+
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      flushBlocks();
+      const level = heading[1]!.length;
+      output.push(`<h${level}>${markdownInline(heading[2]!)}</h${level}>`);
+      continue;
+    }
+    if (/^\s{0,3}((\*\s*){3,}|(-\s*){3,}|(_\s*){3,})$/.test(line)) {
+      flushBlocks();
+      output.push("<hr />");
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && isMarkdownTableDivider(lines[i + 1] ?? "")) {
+      flushBlocks();
+      const headers = markdownTableCells(line);
+      const rows: string[][] = [];
+      i += 1;
+      while (i + 1 < lines.length && isMarkdownTableRow(lines[i + 1] ?? "") && !isMarkdownTableDivider(lines[i + 1] ?? "")) {
+        i += 1;
+        rows.push(markdownTableCells(lines[i] ?? ""));
+      }
+      output.push(`<table><thead><tr>${headers.map((cell) => `<th>${markdownInline(cell)}</th>`).join("")}</tr></thead><tbody>${rows
+        .map((row) => `<tr>${headers.map((_, index) => `<td>${markdownInline(row[index] ?? "")}</td>`).join("")}</tr>`)
+        .join("")}</tbody></table>`);
+      continue;
+    }
+
+    const quoteLine = line.match(/^\s{0,3}>\s?(.*)$/);
+    if (quoteLine) {
+      flushParagraph();
+      closeList();
+      quote.push(quoteLine[1] ?? "");
+      continue;
+    }
+    flushQuote();
+
+    const unordered = line.match(/^\s{0,3}[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s{0,3}\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      const nextType: "ul" | "ol" = unordered ? "ul" : "ol";
+      if (listType !== nextType) {
+        closeList();
+        listType = nextType;
+        output.push(`<${listType}>`);
+      }
+      output.push(`<li>${markdownInline((unordered ?? ordered)![1]!)}</li>`);
+      continue;
+    }
+
+    closeList();
+    paragraph.push(line.trim());
+  }
+
+  if (code) output.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+  flushBlocks();
+  return output.join("") || `<p class="markdown-empty">（空内容）</p>`;
+}
+
+function isMarkdownTableRow(value: string): boolean {
+  return /^\s*\|?.+\|.+\|?\s*$/.test(value);
+}
+
+function isMarkdownTableDivider(value: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(value);
+}
+
+function markdownTableCells(value: string): string[] {
+  const trimmed = value.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function markdownInline(value: string): string {
+  let html = esc(value);
+  html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  html = html.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|#)[^\s)]+)\)/gi, (_match, label: string, href: string) => `<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`);
+  html = html.replace(/~~(.+?)~~/g, "<del>$1</del>");
+  html = html.replace(/(\*\*|__)(.+?)\1/g, "<strong>$2</strong>");
+  html = html.replace(/(\*|_)([^*_\n]+?)\1/g, "<em>$2</em>");
+  return html;
+}
+
+/** Builds a document for a script-disabled, opaque-origin preview iframe. */
+export function htmlPreviewDocument(value: string | null | undefined): string {
+  const safe = String(value ?? "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<\/?(script|iframe|frame|frameset|object|embed|base|meta|link|form)\b[^>]*>/gi, "")
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s+(?:href|src)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*'|javascript:[^\s>]+)/gi, "");
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'">`;
+  const source = safe.trim();
+  const fullDocument = /<(?:html|head|body)\b/i.test(source) || /^<!doctype\s+html\b/i.test(source);
+  // Put the policy before any source markup. The HTML parser merges the
+  // source's html/head/body into the document, retaining attributes and CSS.
+  // Full documents keep their own typography, table spacing and borders.
+  const prefix = `<!doctype html><meta charset="utf-8">${csp}<style>:root { color-scheme: light; }</style>`;
+  if (fullDocument) return prefix + source;
+
+  const fragmentStyle = `<style>
+    :root { color-scheme: light; }
+    :where(body) { margin: 24px; color: #20242b; background: #fff; font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: break-word; }
+    :where(img) { max-width: 100%; height: auto; }
+    :where(pre) { padding: 12px; overflow: auto; background: #f3f4f6; border-radius: 8px; }
+    :where(code) { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    :where(table) { border-collapse: collapse; }
+    :where(th:not([align]), td:not([align])) { text-align: left; }
+    :where(a) { color: #d54b3e; }
+  </style>`;
+  return `<!doctype html><html><head><meta charset="utf-8">${csp}${fragmentStyle}</head><body>${safe}</body></html>`;
 }
 
 export const writeCommands = new Set([

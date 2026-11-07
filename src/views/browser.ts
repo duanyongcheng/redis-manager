@@ -1,7 +1,7 @@
 import { icon } from "../core/icons";
-import { bytes, clip, esc, isJson, keyPrefix, num, safeJson, ttl, typeLabel } from "../core/format";
+import { bytes, clip, decodeJsonString, esc, htmlPreviewDocument, keyPrefix, markdownToHtml, num, safeJson, ttl, typeLabel } from "../core/format";
 import type { RedisValue } from "../core/api";
-import { currentConnection, type ConnectionKey, type ViewState } from "../core/store";
+import { currentConnection, type ConnectionKey, type ValueViewMode, type ViewState } from "../core/store";
 import { settings } from "../theme/settings";
 import { emptyState, iconBtn, pill } from "../ui/kit";
 
@@ -112,14 +112,14 @@ function valuePanel(s: ViewState): string {
     </div>
   </header>`;
 
-  return `${head}<div class="value-body scroll">${valueBody(v)}</div>${valueFoot(v)}`;
+  return `${head}<div class="value-body ${v.type === "string" ? "value-body-string" : "scroll"}">${valueBody(v, s.valueMode)}</div>${valueFoot(v)}`;
 }
 
-function valueBody(v: RedisValue): string {
+function valueBody(v: RedisValue, viewMode: ValueViewMode): string {
   const maxBytes = settings.get("maxValueBytes");
   switch (v.type) {
     case "string":
-      return stringBody(v, maxBytes);
+      return stringBody(v, maxBytes, viewMode);
     case "hash": {
       const entries = Object.entries(v.hash ?? {});
       const rows = entries
@@ -155,21 +155,41 @@ function valueBody(v: RedisValue): string {
   }
 }
 
-function stringBody(v: RedisValue, maxBytes: number): string {
+function stringBody(v: RedisValue, maxBytes: number, viewMode: ValueViewMode): string {
   const raw = String(v.stringValue ?? "");
   const tooBig = v.sizeBytes > maxBytes;
-  const shown = clip(raw, tooBig ? Math.min(maxBytes, 200_000) : 200_000);
-  const json = isJson(raw);
-  const tabs = `<div class="segmented" style="margin-bottom:10px">
-    <button class="active" data-seg-action="view-mode" data-seg-value="raw">原始</button>
-    <button data-seg-action="view-mode" data-seg-value="json" ${json ? "" : "disabled"}>JSON</button>
-    <button data-seg-action="view-mode" data-seg-value="hex">Hex</button>
+  const limit = tooBig ? Math.min(maxBytes, 200_000) : 200_000;
+  const json = safeJson(raw);
+  const activeMode = viewMode === "json" && !json.ok ? "raw" : viewMode;
+  const tab = (mode: ValueViewMode, label: string, disabled = false) => `<button class="${activeMode === mode ? "active" : ""}" data-seg-action="view-mode" data-seg-value="${mode}" aria-pressed="${activeMode === mode}" ${disabled ? "disabled" : ""}>${label}</button>`;
+  const tabs = `<div class="segmented value-formats" role="group" aria-label="值显示格式">
+    ${tab("raw", "原始")}
+    ${tab("json", "JSON", !json.ok)}
+    ${tab("hex", "Hex")}
+    ${tab("html", "HTML 预览")}
+    ${tab("markdown", "MD 预览")}
   </div>`;
-  const body = `<pre class="code-box mono" data-view="raw">${esc(shown.text)}</pre>
-    <pre class="code-box mono hidden" data-view="json">${esc(json ? safeJson(raw).ok && (safeJson(raw) as { pretty: string }).pretty : "")}</pre>
-    <pre class="code-box mono hidden" data-view="hex">${esc(hexDump(shown.text))}</pre>
-    ${shown.truncated ? `<div class="notice info" style="margin-top:8px">值较大（${bytes(v.sizeBytes)}），只渲染了前 ${bytes(shown.text.length)}。可在设置中调整单次载入上限。</div>` : ""}`;
-  return tabs + body;
+  const previewMode = activeMode === "html" || activeMode === "markdown";
+  const shown = clip(previewMode ? decodeJsonString(raw).text : raw, limit);
+  let body: string;
+  switch (activeMode) {
+    case "html":
+      body = `<iframe class="html-preview" data-view="html" title="HTML 预览" sandbox="" referrerpolicy="no-referrer" srcdoc="${esc(htmlPreviewDocument(shown.text))}"></iframe>`;
+      break;
+    case "markdown":
+      body = `<article class="markdown-preview" data-view="markdown">${markdownToHtml(shown.text)}</article>`;
+      break;
+    case "json":
+      body = `<pre class="code-box mono" data-view="json">${esc(json.ok ? json.pretty : raw)}</pre>`;
+      break;
+    case "hex":
+      body = `<pre class="code-box mono" data-view="hex">${esc(hexDump(shown.text))}</pre>`;
+      break;
+    default:
+      body = `<pre class="code-box mono" data-view="raw">${esc(shown.text)}</pre>`;
+  }
+  const notice = shown.truncated ? `<div class="notice info">值较大（${bytes(v.sizeBytes)}），只渲染了前 ${bytes(shown.text.length)}。可在设置中调整单次载入上限。</div>` : "";
+  return tabs + body + notice;
 }
 
 function hexDump(text: string): string {

@@ -9,6 +9,7 @@
     "dev:web": "vite",
     "build:web": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test:previews": "node scripts/test-value-preview.mjs",
     "package:mac": "./scripts/build.sh mac",
     "package:mac:universal": "./scripts/build.sh mac --arch universal",
     "package:web": "./scripts/build.sh web",

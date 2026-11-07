@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	appName      = "Redis Manager"
-	defaultPort  = 6379
-	defaultDB    = 0
-	defaultScan  = 200
-	maxScanCount = 1000
+	appName           = "Redis Manager"
+	defaultPort       = 6379
+	defaultDB         = 0
+	defaultScan       = 200
+	maxScanCount      = 1000
+	metadataBatchSize = 200
 )
 
 // Connection is the public connection definition. Passwords are kept in the
@@ -369,21 +370,58 @@ func (s *RedisService) ScanKeys(connID string, db int, pattern string, cursor ui
 		return KeyPage{}, err
 	}
 	page := KeyPage{Cursor: next, Done: next == 0, Keys: make([]KeyMeta, 0, len(keys))}
-	for _, key := range keys {
-		meta := KeyMeta{Key: key, TTLMS: -1}
-		meta.Type, _ = client.Type(ctx, key).Result()
-		if ttl, ttlErr := client.PTTL(ctx, key).Result(); ttlErr == nil {
-			meta.TTLMS = ttl.Milliseconds()
-		}
-		if size, sizeErr := client.MemoryUsage(ctx, key).Result(); sizeErr == nil {
-			meta.SizeBytes = size
-		}
-		if encoding, encodingErr := client.Do(ctx, "OBJECT", "ENCODING", key).Result(); encodingErr == nil {
-			meta.Encoding = fmt.Sprint(encoding)
-		}
-		page.Keys = append(page.Keys, meta)
-	}
+	page.Keys = enrichKeyMetadata(ctx, client, keys)
 	return page, nil
+}
+
+type keyMetadataCommands struct {
+	typ      *redis.StatusCmd
+	ttl      *redis.DurationCmd
+	size     *redis.IntCmd
+	encoding *redis.StringCmd
+}
+
+// enrichKeyMetadata batches the per-key lookups so a remote Redis server only
+// needs a small number of network round trips for each SCAN page.
+func enrichKeyMetadata(ctx context.Context, client redis.UniversalClient, keys []string) []KeyMeta {
+	result := make([]KeyMeta, 0, len(keys))
+	for start := 0; start < len(keys); start += metadataBatchSize {
+		end := start + metadataBatchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		batch := keys[start:end]
+		commands := make([]keyMetadataCommands, len(batch))
+		_, _ = client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for i, key := range batch {
+				commands[i] = keyMetadataCommands{
+					typ:      pipe.Type(ctx, key),
+					ttl:      pipe.PTTL(ctx, key),
+					size:     pipe.MemoryUsage(ctx, key),
+					encoding: pipe.ObjectEncoding(ctx, key),
+				}
+			}
+			return nil
+		})
+		for i, key := range batch {
+			commandsForKey := commands[i]
+			meta := KeyMeta{Key: key, TTLMS: -1}
+			if typ, err := commandsForKey.typ.Result(); err == nil {
+				meta.Type = typ
+			}
+			if ttl, err := commandsForKey.ttl.Result(); err == nil {
+				meta.TTLMS = ttl.Milliseconds()
+			}
+			if size, err := commandsForKey.size.Result(); err == nil {
+				meta.SizeBytes = size
+			}
+			if encoding, err := commandsForKey.encoding.Result(); err == nil {
+				meta.Encoding = encoding
+			}
+			result = append(result, meta)
+		}
+	}
+	return result
 }
 
 // GetValue reads a key and returns a type-specific value representation.
@@ -394,19 +432,30 @@ func (s *RedisService) GetValue(connID string, db int, key string) (RedisValue, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	typ, err := client.Type(ctx, key).Result()
-	if err != nil {
-		return RedisValue{}, err
+	var typCmd *redis.StatusCmd
+	var ttlCmd *redis.DurationCmd
+	var sizeCmd *redis.IntCmd
+	var encodingCmd *redis.StringCmd
+	_, _ = client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		typCmd = pipe.Type(ctx, key)
+		ttlCmd = pipe.PTTL(ctx, key)
+		sizeCmd = pipe.MemoryUsage(ctx, key)
+		encodingCmd = pipe.ObjectEncoding(ctx, key)
+		return nil
+	})
+	typ, typeErr := typCmd.Result()
+	if typeErr != nil {
+		return RedisValue{}, typeErr
 	}
 	value := RedisValue{Key: key, Type: typ, TTLMs: -1}
-	if ttl, ttlErr := client.PTTL(ctx, key).Result(); ttlErr == nil {
+	if ttl, ttlErr := ttlCmd.Result(); ttlErr == nil {
 		value.TTLMs = ttl.Milliseconds()
 	}
-	if size, sizeErr := client.MemoryUsage(ctx, key).Result(); sizeErr == nil {
+	if size, sizeErr := sizeCmd.Result(); sizeErr == nil {
 		value.SizeBytes = size
 	}
-	if encoding, encodingErr := client.Do(ctx, "OBJECT", "ENCODING", key).Result(); encodingErr == nil {
-		value.Encoding = fmt.Sprint(encoding)
+	if encoding, encodingErr := encodingCmd.Result(); encodingErr == nil {
+		value.Encoding = encoding
 	}
 	switch typ {
 	case "string":
@@ -540,9 +589,6 @@ func (s *RedisService) GetOverview(connID string, db int) (OverviewSnapshot, err
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	start := time.Now()
-	if err := client.Ping(ctx).Err(); err != nil {
-		return OverviewSnapshot{}, err
-	}
 	info, err := client.Info(ctx, "server", "stats", "clients", "memory", "keyspace", "commandstats", "replication").Result()
 	if err != nil {
 		return OverviewSnapshot{}, err
@@ -710,7 +756,6 @@ func (s *RedisService) clientFor(id string, db int) (redis.UniversalClient, erro
 	if !ok {
 		return nil, fmt.Errorf("connection %q not found", id)
 	}
-	record = hydratePassword(record)
 	if db < 0 {
 		db = record.DB
 	}
@@ -722,6 +767,7 @@ func (s *RedisService) clientFor(id string, db int) (redis.UniversalClient, erro
 		delete(s.clients, id)
 		delete(s.clientDBs, id)
 	}
+	record = hydratePassword(record)
 	record.DB = db
 	client, err := newRedisClient(record)
 	if err != nil {

@@ -7,6 +7,7 @@ import {
   clearCliLog,
   confirmDialog,
   currentConnection,
+  currentDb,
   deleteSelectedKey,
   go,
   loadMonitor,
@@ -66,9 +67,35 @@ const PAGE_VIEWS: Record<PageId, (s: ViewState) => string> = {
   settings: () => settingsView(),
 };
 
-let lastKey = "";
 let scrollMemo: Record<string, number> = {};
 let hasPaintedApp = false;
+let renderedContext = "";
+
+// Keep the connected value subtree when only the surrounding metrics change.
+// Detaching and reinserting an iframe would reload its document and scroll.
+function updateRenderedApp(html: string, context: string) {
+  if (!hasPaintedApp) {
+    root.innerHTML = html;
+  } else {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const updateRegion = (selector: string, replace = false) => {
+      const previous = root.querySelector(selector);
+      const next = template.content.querySelector(selector);
+      if (previous && next && (replace || !previous.isEqualNode(next))) previous.replaceWith(next);
+    };
+    for (const selector of [".topbar", ".sidebar", ".tabs", ".data-context", ".statusbar", ".app-overlays"]) updateRegion(selector);
+    if (context === renderedContext && state.page === "browser" && root.querySelector(".browser") && template.content.querySelector(".browser")) {
+      updateRegion(".browser-keys");
+      updateRegion(".browser-value");
+    } else {
+      updateRegion(".content", true);
+    }
+    root.querySelector(".app")?.classList.remove("app-enter");
+  }
+  renderedContext = context;
+  hasPaintedApp = true;
+}
 
 function pageBody(s: ViewState): string {
   const view = PAGE_VIEWS[s.page] ?? overviewView;
@@ -92,10 +119,6 @@ function render() {
   const prevKeys = root.querySelector<HTMLElement>(".key-list");
   if (prevKeys) scrollMemo["keys"] = prevKeys.scrollTop;
 
-  const editorKey = s.connectionEditor ? `${s.connectionEditor.mode}:${s.connectionEditor.id ?? "new"}` : "";
-  const signature = `${s.page}|${conn?.id}|${conn?.status}|${s.toasts.length}|${s.paletteOpen}|${editorKey}`;
-  lastKey = signature;
-
   const html = `
     <div class="app${hasPaintedApp ? "" : " app-enter"}">
       ${topbar(s)}
@@ -109,14 +132,15 @@ function render() {
       </div>
       ${statusbar(s)}
     </div>
-    ${palette(s)}
-    ${s.connectionEditor ? connectionDialog(s, ui.draft ?? editorDraft(s), ui.testResult) : ""}
-    ${ui.themeMenu ? themeMenu(s) : ""}
-    ${confirmModal(s)}
-    ${toasts(s)}`;
+    <div class="app-overlays">
+      ${palette(s)}
+      ${s.connectionEditor ? connectionDialog(s, ui.draft ?? editorDraft(s), ui.testResult) : ""}
+      ${ui.themeMenu ? themeMenu(s) : ""}
+      ${confirmModal(s)}
+      ${toasts(s)}
+    </div>`;
 
-  root.innerHTML = html;
-  hasPaintedApp = true;
+  updateRenderedApp(html, JSON.stringify([s.page, conn?.id, currentDb(conn)]));
   document.title = conn ? `Redis Manager — ${conn.name || conn.host}` : "Redis Manager";
 
   // restore scrolls
@@ -280,7 +304,6 @@ async function onSaveConnection() {
     ui.draft = null;
     ui.testResult = null;
     patch({ connectionEditor: null });
-    await loadOverview();
   }
 }
 
@@ -481,9 +504,8 @@ document.addEventListener("click", (event) => {
   }
   const segValue = closest<HTMLElement>(target, "[data-seg-action]");
   if (segValue?.dataset.segAction === "view-mode") {
-    const mode = segValue.dataset.segValue;
-    root.querySelectorAll<HTMLElement>("[data-view]").forEach((el) => el.classList.toggle("hidden", el.dataset.view !== mode));
-    root.querySelectorAll<HTMLElement>('[data-seg-action="view-mode"]').forEach((el) => el.classList.toggle("active", el === segValue));
+    const mode = segValue.dataset.segValue as ViewState["valueMode"];
+    if (["raw", "json", "hex", "html", "markdown"].includes(mode)) patch({ valueMode: mode });
     return;
   }
   const windowBtn = closest<HTMLElement>(target, "[data-window]");
@@ -800,10 +822,6 @@ async function boot() {
   window.__RM_SERVICE__ = state.serviceAvailable;
   window.__RM_DEBUG__ = { outside: window.__RM_OUTSIDE__, available: api.available, hasWindowSvc: Boolean(window.RedisService) };
   await refreshConnections();
-  if (currentConnection()) {
-    if (state.page === "monitor") await loadMonitor();
-    else await loadOverview();
-  }
   const params = new URLSearchParams(location.search);
   setWindowSize(state, ui.windowSize);
   // Preview deep links (used by scripts/shoot-all.mjs) may force a theme.
@@ -818,7 +836,6 @@ async function boot() {
   const page = params.get("page") as PageId | null;
   if (page && PAGE_VIEWS[page]) go(page);
   if (state.serviceAvailable) {
-    await loadOverview();
     startPolling();
   }
 }
@@ -827,7 +844,8 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopPolling();
   else if (state.serviceAvailable) {
     startPolling();
-    void loadOverview();
+    if (state.page === "monitor") void loadMonitor();
+    else void loadOverview();
   }
 });
 

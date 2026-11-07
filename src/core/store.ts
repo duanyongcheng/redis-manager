@@ -3,6 +3,7 @@ import { settings } from "../theme/settings";
 
 export type PageId = "overview" | "browser" | "cli" | "monitor" | "connections" | "settings";
 export type ConnStatus = "on" | "warn" | "off";
+export type ValueViewMode = "raw" | "json" | "hex" | "html" | "markdown";
 
 export interface ConnectionView extends Connection {
   status: ConnStatus;
@@ -81,6 +82,7 @@ export interface ViewState {
   keyType: string;
   keyQuery: string;
   selectedKey: string | null;
+  valueMode: ValueViewMode;
   value: RedisValue | null;
   valueLoading: boolean;
   valueError: string;
@@ -99,6 +101,7 @@ export interface ViewState {
 
 const HISTORY_LIMIT = 90;
 const keyOf = (connId: string) => connId;
+const overviewRequests = new Map<string, Promise<void>>();
 
 export const state: ViewState = {
   page: "overview",
@@ -121,6 +124,7 @@ export const state: ViewState = {
   keyType: "all",
   keyQuery: "",
   selectedKey: null,
+  valueMode: "raw",
   value: null,
   valueLoading: false,
   valueError: "",
@@ -314,10 +318,20 @@ function pushSample(connId: string, overview: OverviewSnapshot, netIn: number, n
   state.history[connId] = list.slice(-HISTORY_LIMIT);
 }
 
-export async function loadOverview(): Promise<void> {
+export function loadOverview(): Promise<void> {
   const conn = currentConnection();
-  if (!conn || !api.available) return;
+  if (!conn || !api.available) return Promise.resolve();
   const db = currentDb(conn);
+  const requestKey = `${conn.id}:${db}`;
+  const inFlight = overviewRequests.get(requestKey);
+  if (inFlight) return inFlight;
+
+  const request = loadOverviewRequest(conn, db, requestKey);
+  overviewRequests.set(requestKey, request);
+  return request;
+}
+
+async function loadOverviewRequest(conn: ConnectionView, db: number, requestKey: string): Promise<void> {
   try {
     const overview = await redis.getOverview(conn.id, db);
     if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
@@ -334,6 +348,8 @@ export async function loadOverview(): Promise<void> {
     });
   } catch (error) {
     updateConn(conn.id, { status: "off", error: errorMessage(error) });
+  } finally {
+    overviewRequests.delete(requestKey);
   }
   notify();
 }
@@ -372,15 +388,16 @@ export async function selectConnection(id: string) {
   state.connId = id;
   state.page = state.pageByConn[id] ?? "overview";
   state.selectedKey = null;
+  state.valueMode = "raw";
   state.value = null;
   state.keys = [];
   state.keyDone = false;
   state.keyCursor = 0;
   state.sidebarOpen = false;
   notify();
-  await loadOverview();
+  if (state.page === "monitor") await loadMonitor();
+  else await loadOverview();
   if (state.page === "browser") void scanKeys({ reset: true });
-  if (state.page === "monitor") void loadMonitor();
 }
 
 export async function selectDatabase(db: number) {
@@ -390,6 +407,7 @@ export async function selectDatabase(db: number) {
   if (currentDb(conn) === next) return;
   state.dbByConn = { ...state.dbByConn, [conn.id]: next };
   state.selectedKey = null;
+  state.valueMode = "raw";
   state.value = null;
   state.valueLoading = false;
   state.valueError = "";
@@ -404,10 +422,10 @@ export async function selectDatabase(db: number) {
   delete state.cliSessions[conn.id];
   delete state.cliActive[conn.id];
   notify();
-  await loadOverview();
+  if (state.page === "monitor") await loadMonitor();
+  else await loadOverview();
   if (currentConnection()?.id !== conn.id || currentDb(conn) !== next) return;
   if (state.page === "browser") void scanKeys({ reset: true });
-  if (state.page === "monitor") void loadMonitor();
 }
 
 export async function testConnection(conn: ConnectionView) {
@@ -467,6 +485,7 @@ export async function openKey(key: string): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return;
   const db = currentDb(conn);
+  if (state.selectedKey !== key) state.valueMode = "raw";
   state.selectedKey = key;
   state.valueLoading = true;
   state.valueError = "";
@@ -494,6 +513,7 @@ export async function deleteSelectedKey(): Promise<void> {
     toast("ok", `已删除 ${value.key}`);
     state.value = null;
     state.selectedKey = null;
+    state.valueMode = "raw";
     state.keys = state.keys.filter((k) => k.key !== value.key);
     notify();
     await scanKeys({ reset: true });
