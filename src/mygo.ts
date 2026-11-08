@@ -4,6 +4,13 @@ import { call } from "mygo-runtime";
 
 // ---- Types ----
 
+/** AppInfo describes the running build, independently of any Redis connection. */
+export interface AppInfo {
+  version: string;
+  isDev: boolean;
+  updatesEnabled: boolean;
+}
+
 export interface CLILine {
   kind: string;
   text: string;
@@ -161,6 +168,23 @@ export interface ZSetEntry {
 }
 
 // ---- Services ----
+
+/**
+ * AppService exposes application actions to the main window. The updater
+ * plugin keeps its download, signature verification and restart UI separate.
+ */
+export const AppService = {
+  /**
+   * CheckForUpdates opens the built-in update window without installing or
+   * restarting automatically. The plugin handles repeated calls and UI dispatch.
+   */
+  checkForUpdates(): Promise<void> {
+    return call("AppService.CheckForUpdates");
+  },
+  getAppInfo(): Promise<AppInfo> {
+    return call("AppService.GetAppInfo");
+  },
+} as const;
 
 /** RedisService owns saved connections and lazily creates Redis clients. */
 export const RedisService = {

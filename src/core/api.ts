@@ -1,5 +1,7 @@
 import * as bindings from "../mygo";
+import { isMyGo } from "mygo-runtime";
 import type {
+  AppInfo,
   CLIResult,
   Connection,
   ConnectionTest,
@@ -22,6 +24,28 @@ export interface Api {
 }
 
 const globalService = (window as unknown as { RedisService?: Service }).RedisService;
+
+declare global {
+  interface Window {
+    AppService?: typeof bindings.AppService;
+  }
+}
+
+// A browser fixture can supply AppService explicitly. Ordinary browser pages
+// must not pretend that importing a generated client creates a native bridge.
+const appService = window.AppService ?? (isMyGo() ? bindings.AppService : null);
+
+export const application = {
+  available: appService !== null,
+  getAppInfo: (): Promise<AppInfo> => {
+    if (!appService) return Promise.reject(new Error("软件更新仅在 Redis Manager 桌面应用中可用。"));
+    return appService.getAppInfo();
+  },
+  checkForUpdates: (): Promise<void> => {
+    if (!appService) return Promise.reject(new Error("软件更新仅在 Redis Manager 桌面应用中可用。"));
+    return appService.checkForUpdates();
+  },
+};
 
 /**
  * The generated client only works inside a MyGo window; its calls are
@@ -72,4 +96,4 @@ export const redis = {
   execCLI: (id: string, db: number, line: string, readOnly: boolean): Promise<CLIResult> => svc().execCLI(id, db, line, readOnly),
 };
 
-export type { CLIResult, Connection, ConnectionTest, KeyPage, MonitorSnapshot, OverviewSnapshot, RedisValue };
+export type { AppInfo, CLIResult, Connection, ConnectionTest, KeyPage, MonitorSnapshot, OverviewSnapshot, RedisValue };

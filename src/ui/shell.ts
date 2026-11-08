@@ -26,7 +26,7 @@ export function topbar(s: ViewState): string {
   // The window keeps its native title bar, which already shows the traffic
   // lights, so the in-page top bar starts with the brand.
   return `<header class="topbar">
-    <div class="brand"><span class="brand-logo">R</span><span class="brand-name">Redis Manager</span><span class="brand-version">0.1.0</span></div>
+    <div class="brand"><span class="brand-logo">R</span><span class="brand-name">Redis Manager</span><span class="brand-version" data-app-version>${esc(s.appInfo?.version || (s.appInfo?.isDev ? "开发版" : "—"))}</span></div>
     <button class="topbar-search" data-action="palette">
       ${icon("search", 14)}
       <input readonly placeholder="搜索连接、键或执行命令…" tabindex="-1" />

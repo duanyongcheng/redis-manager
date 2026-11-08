@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# Serialize releases so a late older build cannot replace a newer latest feed.
+concurrency:
+  group: redis-manager-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+  MYGO_UPDATER_PUBLIC_KEY: ${{ vars.MYGO_UPDATER_PUBLIC_KEY }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin/universal
+            target: darwin-universal
+          - os: ubuntu-24.04
+            platform: windows/amd64
+            target: windows-amd64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.16"
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Validate release version, notes and signing keys
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+        run: bun run release:check
+      - name: Check release validation regressions
+        run: bun run test:release
+      - name: Check application code
+        run: |
+          bun run typecheck
+          go vet ./...
+      - name: Install Windows installer tooling
+        if: matrix.target == 'windows-amd64'
+        run: sudo apt-get update && sudo apt-get install -y nsis
+      - name: Build installers and signed update payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: node node_modules/mygo-cli/bin/mygo.js build -platform "$RELEASE_PLATFORM" -o build
+      - name: Validate and collect platform assets
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: bun scripts/release.mjs collect build release-assets "$RELEASE_TARGET"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish complete release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.16"
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-artifacts
+      - name: Verify both targets and combine checksums
+        run: bun scripts/release.mjs collect release-artifacts release-assets
+      - name: Upload to a draft and publish after all assets succeed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/release.mjs publish release-assets

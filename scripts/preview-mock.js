@@ -4,6 +4,10 @@
  * with `?preview=1`; the real app never loads this file.
  */
 (() => {
+  window.AppService = {
+    getAppInfo: async () => ({ version: "预览", isDev: true, updatesEnabled: false }),
+    checkForUpdates: async () => { throw new Error("浏览器预览不支持软件更新。"); },
+  };
   const now = Date.now();
   const keyspace = [
     { db: 0, keys: 48201, expires: 18798, avgTtlMs: 11520000 },

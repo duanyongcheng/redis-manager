@@ -104,9 +104,19 @@ try {
   await send("Page.enable");
   await send("Runtime.enable");
   await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-  await send("Page.addScriptToEvaluateOnNewDocument", { source: `
+  const fixtureScript = await send("Page.addScriptToEvaluateOnNewDocument", { source: `
     window.__previewValues = ${JSON.stringify(values)};
     window.__overviewCalls = 0;
+    window.__appInfo = {version: "1.7.8", isDev: false, updatesEnabled: true};
+    window.__updateChecks = 0;
+    window.AppService = {
+      getAppInfo: async () => window.__appInfo,
+      checkForUpdates: async () => {
+        window.__updateChecks += 1;
+        if (window.__updateCheckError) throw new Error(window.__updateCheckError);
+        if (window.__holdUpdateCheck) await new Promise(resolve => { window.__finishUpdateCheck = resolve; });
+      },
+    };
     const connections = ["preview", "second"].map(id => ({id, name: id === "preview" ? "预览验证" : "第二个测试连接", group: "Local", host: "localhost", port: 6379, db: 0, mode: "standalone", tls: false, readOnly: true}));
     const keys = Object.keys(window.__previewValues).map(key => ({key, type: "string", ttlMs: -1, sizeBytes: window.__previewValues[key].length, encoding: "raw"}));
     window.RedisService = {
@@ -214,8 +224,39 @@ try {
   await evaluate("document.querySelector('[data-conn=second]').click()");
   await until(() => evaluate("window.__RM_STATE__.connId === 'second'"), "connection change");
   assert.equal(await evaluate("window.__RM_STATE__.valueMode"), "raw", "connection change resets preview mode");
+
+  // Application metadata and update dispatch do not depend on a Redis key.
+  await evaluate("document.querySelector('[data-nav=settings]').click()");
+  await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]'))"), "update settings");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-app-version]'), el => el.textContent)"), ["1.7.8", "1.7.8"], "header and settings use the running version");
+  await evaluate("window.__holdUpdateCheck = true; document.querySelector('[data-action=check-updates]').click(); document.querySelector('[data-action=check-updates]').click()");
+  await until(() => evaluate("window.__updateChecks === 1 && document.querySelector('[data-action=check-updates]').disabled"), "one pending update dispatch");
+  await evaluate("window.__finishUpdateCheck(); window.__holdUpdateCheck = false");
+  await until(() => evaluate("!document.querySelector('[data-action=check-updates]').disabled"), "update dispatch completion");
+  assert.equal(await evaluate("window.__updateChecks"), 1, "repeated clicks must not dispatch duplicate native checks");
+  await evaluate("window.__updateCheckError = '测试更新窗口错误'; document.querySelector('[data-action=check-updates]').click()");
+  await until(() => evaluate("window.__RM_STATE__.toasts.some(toast => toast.title === '无法打开更新窗口' && toast.detail === '测试更新窗口错误')"), "update dispatch error surfaced");
+  await evaluate("window.__updateCheckError = ''; window.__appInfo = {version:'1.7.9-dev', isDev:true, updatesEnabled:false}; import('/src/core/store.ts').then(store => store.loadAppInfo())");
+  assert.equal(await evaluate("document.querySelector('[data-action=check-updates]').disabled"), true, "development builds disable software updates");
+  assert.ok((await evaluate("document.querySelector('[data-update-status]').textContent")).includes("开发构建"));
+  await evaluate("import('/src/core/store.ts').then(store => store.checkForUpdates())");
+  assert.equal(await evaluate("window.__updateChecks"), 2, "disabled checks never reach the native service");
+  await evaluate("window.__appInfo = {version:'1.7.9', isDev:false, updatesEnabled:false}; import('/src/core/store.ts').then(store => store.loadAppInfo())");
+  assert.equal(await evaluate("document.querySelector('[data-action=check-updates]').disabled"), true, "unconfigured or non-writable installed builds do not claim update support");
+  if (screenshots) {
+    await evaluate("window.__appInfo = {version:'1.7.9', isDev:false, updatesEnabled:true}; import('/src/core/store.ts').then(async store => {store.patch({toasts: []}); await store.loadAppInfo()})");
+    await evaluate("document.querySelector('[data-action=check-updates]').scrollIntoView({block:'center'})");
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    await writeFile(join(screenshots, "update-settings.png"), Buffer.from(shot.data, "base64"));
+  }
+
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: fixtureScript.identifier });
+  await send("Page.navigate", { url: `${url}/?page=settings` });
+  await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]')) && !window.__RM_STATE__.appInfoLoading"), "ordinary browser settings");
+  assert.equal(await evaluate("document.querySelector('[data-action=check-updates]').disabled"), true, "browser without a native bridge cannot check updates");
+  assert.ok((await evaluate("document.querySelector('[data-update-status]').textContent")).includes("浏览器预览"));
   assert.deepEqual(exceptions, [], "no browser runtime errors");
-  console.log("PASS: JSON-quoted HTML and Markdown, original CSS, raw values, sandbox, actual polling, iframe scroll, manual refresh, key/database/connection switching");
+  console.log("PASS: value previews, polling/scroll preservation, source styles, runtime version, update dispatch/errors and disabled/browser update states");
 } finally {
   ws?.close();
   if (chrome && chrome.exitCode === null) {

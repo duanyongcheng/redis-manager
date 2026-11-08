@@ -5,12 +5,14 @@ import {
   activeCliSession,
   addCliSession,
   clearCliLog,
+  checkForUpdates,
   confirmDialog,
   currentConnection,
   currentDb,
   deleteSelectedKey,
   go,
   loadMonitor,
+  loadAppInfo,
   loadOverview,
   notify,
   onChange,
@@ -64,7 +66,7 @@ const PAGE_VIEWS: Record<PageId, (s: ViewState) => string> = {
   cli: cliView,
   monitor: monitorView,
   connections: connectionsView,
-  settings: () => settingsView(),
+  settings: settingsView,
 };
 
 let scrollMemo: Record<string, number> = {};
@@ -336,6 +338,7 @@ const actions: Record<string, () => void | Promise<void>> = {
   refresh: () => refreshConnections(),
   "refresh-metrics": () => loadOverview(),
   "refresh-monitor": () => loadMonitor(),
+  "check-updates": () => checkForUpdates(),
   "new-connection": () => openEditor("new"),
   "editor-close": () => {
     ui.draft = null;
@@ -821,6 +824,7 @@ async function boot() {
   window.__RM_READY__ = true;
   window.__RM_SERVICE__ = state.serviceAvailable;
   window.__RM_DEBUG__ = { outside: window.__RM_OUTSIDE__, available: api.available, hasWindowSvc: Boolean(window.RedisService) };
+  void loadAppInfo();
   await refreshConnections();
   const params = new URLSearchParams(location.search);
   setWindowSize(state, ui.windowSize);

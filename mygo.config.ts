@@ -1,5 +1,8 @@
 import { defineConfig } from "mygo-cli";
 
+// Public verification key only. The signing key stays in the CI secret.
+const updatePublicKey = process.env.MYGO_UPDATER_PUBLIC_KEY?.trim();
+
 export default defineConfig({
   name: "redis-manager",
   identifier: "top.fcodex.redismanager",
@@ -10,4 +13,10 @@ export default defineConfig({
   frontendDist: "dist",
   bindings: "src/mygo.ts",
   out: "build",
+  updates: updatePublicKey ? {
+    publicKey: updatePublicKey,
+    github: "duanyongcheng/redis-manager",
+    changelog: "CHANGELOG.md",
+    deltas: 3,
+  } : undefined,
 });

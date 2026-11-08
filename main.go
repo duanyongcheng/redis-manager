@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -1115,6 +1116,8 @@ var writeCommands = map[string]bool{
 }
 
 func main() {
+	mygo.Use(updater.New(updater.Options{Language: "zh-Hans"}))
+	mygo.Bind(&AppService{})
 	service := NewRedisService()
 	mygo.Bind(service)
 	mygo.App.WhenReady(func() {

@@ -1,4 +1,4 @@
-import { api, errorMessage, redis, type Connection, type KeyPage, type MonitorSnapshot, type OverviewSnapshot, type RedisValue } from "./api";
+import { api, application, errorMessage, redis, type AppInfo, type Connection, type KeyPage, type MonitorSnapshot, type OverviewSnapshot, type RedisValue } from "./api";
 import { settings } from "../theme/settings";
 
 export type PageId = "overview" | "browser" | "cli" | "monitor" | "connections" | "settings";
@@ -68,6 +68,10 @@ export interface ViewState {
   loadingConnections: boolean;
   globalError: string;
   serviceAvailable: boolean;
+  appInfo: AppInfo | null;
+  appInfoLoading: boolean;
+  appInfoError: string;
+  openingUpdater: boolean;
 
   overview: Record<string, OverviewSnapshot>;
   history: Record<string, MetricSample[]>;
@@ -112,6 +116,10 @@ export const state: ViewState = {
   loadingConnections: false,
   globalError: "",
   serviceAvailable: api.available,
+  appInfo: null,
+  appInfoLoading: false,
+  appInfoError: "",
+  openingUpdater: false,
   overview: {},
   history: {},
   monitor: {},
@@ -268,6 +276,46 @@ export function go(page: PageId) {
 /* ------------------------------------------------------------------ */
 /* Data loading                                                        */
 /* ------------------------------------------------------------------ */
+
+export async function loadAppInfo(): Promise<void> {
+  if (state.appInfoLoading) return;
+  if (!application.available) {
+    state.appInfo = null;
+    state.appInfoError = "当前为浏览器预览，软件更新仅在桌面应用中可用。";
+    notify();
+    return;
+  }
+  state.appInfoLoading = true;
+  notify();
+  try {
+    state.appInfo = await application.getAppInfo();
+    state.appInfoError = "";
+  } catch (error) {
+    state.appInfo = null;
+    state.appInfoError = errorMessage(error);
+  } finally {
+    state.appInfoLoading = false;
+    notify();
+  }
+}
+
+export async function checkForUpdates(): Promise<void> {
+  if (state.openingUpdater) return;
+  if (!application.available || !state.appInfo?.updatesEnabled) {
+    toast("info", "当前无法检查更新", state.appInfoError || (state.appInfo?.isDev ? "开发构建不会检查软件更新。" : "请使用支持更新的发布包，并安装到可写目录。"));
+    return;
+  }
+  state.openingUpdater = true;
+  notify();
+  try {
+    await application.checkForUpdates();
+  } catch (error) {
+    toast("err", "无法打开更新窗口", errorMessage(error));
+  } finally {
+    state.openingUpdater = false;
+    notify();
+  }
+}
 
 export async function refreshConnections(): Promise<void> {
   if (!api.available) {

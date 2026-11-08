@@ -1,11 +1,20 @@
 import { icon } from "../core/icons";
 import { bytes, esc } from "../core/format";
+import type { ViewState } from "../core/store";
 import { THEMES, themeMeta, type ThemeId } from "../theme/themes";
 import { settings } from "../theme/settings";
 import { btn, card, switchControl } from "../ui/kit";
 
-export function settingsView(): string {
+export function settingsView(s: ViewState): string {
   const current = settings.get();
+  const info = s.appInfo;
+  const updateStatus = s.appInfoLoading
+    ? "正在读取软件版本…"
+    : s.appInfoError || (info?.isDev
+      ? "开发构建不会检查软件更新。"
+      : info?.updatesEnabled
+        ? "发现新版本时会显示更新提示，可选择安装、稍后提醒或跳过。"
+        : "此构建或安装位置暂不支持自动更新。");
   return `<div class="settings">
     <div class="page-head"><h1>设置</h1><span class="sub">主题 · 浏览 · CLI · 凭据</span></div>
     <div class="settings-stack">
@@ -48,10 +57,13 @@ export function settingsView(): string {
         title: "关于",
         iconName: "info",
         body: `<div class="kv-list">
-          <div class="kv-row"><span class="kv-k">版本</span><span class="kv-v">0.1.0</span></div>
+          <div class="kv-row"><span class="kv-k">版本</span><span class="kv-v" data-app-version>${esc(info?.version || (info?.isDev ? "开发版" : "—"))}</span></div>
           <div class="kv-row"><span class="kv-k">运行时</span><span class="kv-v">Go + MyGo 0.7.4 · WebView</span></div>
           <div class="kv-row"><span class="kv-k">Redis 客户端</span><span class="kv-v">go-redis v9</span></div>
           <div class="kv-row"><span class="kv-k">单次载入上限</span><span class="kv-v">${bytes(current.maxValueBytes)}</span></div>
+        </div>
+        <div class="setting-row"><div><b>软件更新</b><span class="hint" data-update-status>${esc(updateStatus)}</span></div>
+          <button class="btn" data-action="check-updates" ${!info?.updatesEnabled || s.openingUpdater ? "disabled" : ""}>${icon("refresh", 13)} ${s.openingUpdater ? "正在打开…" : "检查更新"}</button>
         </div>
         <div style="display:flex;gap:8px;margin-top:14px">${btn("恢复默认设置", "reset-settings", { kind: "ghost", iconName: "refresh" })}</div>`,
       })}

@@ -16,3 +16,10 @@
 /.mygo/
 node_modules/
 *.app
+
+# Release staging and private signing material
+/release-artifacts/
+/release-assets/
+mygo-update.key
+*.p12
+*.pfx
