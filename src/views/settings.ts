@@ -18,7 +18,7 @@ export function settingsView(s: ViewState): string {
   return `<div class="settings">
     <div class="page-head"><h1>设置</h1><span class="sub">主题 · 浏览 · CLI · 凭据</span></div>
     <div class="settings-stack">
-      ${card({ title: "外观 · 主题", iconName: "layers", meta: "切换后会立即应用并记住", body: themePicker(current.theme, current.scheme) })}
+      ${card({ title: "外观 · 主题", iconName: "layers", cls: "settings-theme", meta: "切换后会立即应用并记住", body: themePicker(current.theme, current.scheme) })}
       ${card({
         title: "浏览",
         iconName: "listTree",
@@ -56,6 +56,7 @@ export function settingsView(s: ViewState): string {
       ${card({
         title: "关于",
         iconName: "info",
+        cls: "settings-about",
         body: `<div class="kv-list">
           <div class="kv-row"><span class="kv-k">版本</span><span class="kv-v" data-app-version>${esc(info?.version || (info?.isDev ? "开发版" : "—"))}</span></div>
           <div class="kv-row"><span class="kv-k">运行时</span><span class="kv-v">Go + MyGo 0.7.4 · WebView</span></div>

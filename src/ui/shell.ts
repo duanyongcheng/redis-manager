@@ -186,18 +186,18 @@ export function statusbar(s: ViewState): string {
 /* Command palette                                                     */
 /* ------------------------------------------------------------------ */
 
-export function palette(s: ViewState): string {
+export function palette(s: ViewState, query = "", activeAction = ""): string {
   if (!s.paletteOpen) return "";
   const conn = currentConnection();
   return `<div class="scrim" data-action="palette-close">
     <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板" data-stop>
-      <div class="palette-input">${icon("search", 16)}<input id="palette-input" placeholder="搜索连接、键、页面或执行命令…" autocomplete="off" spellcheck="false" /><span class="kbd">esc</span></div>
-      <div class="palette-list" id="palette-list">${paletteList(s, "")}</div>
+      <div class="palette-input">${icon("search", 16)}<input id="palette-input" value="${esc(query)}" placeholder="搜索连接、键、页面或执行命令…" autocomplete="off" spellcheck="false" /><span class="kbd">esc</span></div>
+      <div class="palette-list" id="palette-list">${paletteList(s, query, activeAction)}</div>
     </div>
   </div>`;
 }
 
-export function paletteList(s: ViewState, query: string): string {
+export function paletteList(s: ViewState, query: string, activeAction = ""): string {
   const q = query.trim().toLowerCase();
   const conn = currentConnection();
   const groups: { title: string; items: { label: string; hint: string; action: string; iconName: string }[] }[] = [];
@@ -230,7 +230,7 @@ export function paletteList(s: ViewState, query: string): string {
       const items = g.items.filter((i) => !q || `${i.label} ${i.hint}`.toLowerCase().includes(q)).slice(0, q ? 6 : 8);
       if (!items.length) return "";
       return `<div class="palette-group">${esc(g.title)}</div>${items
-        .map((i) => `<button class="palette-item" data-palette-action="${esc(i.action)}">${icon(i.iconName, 14)}<span class="ellipsis">${esc(i.label)}</span><span class="p-hint">${esc(i.hint)}</span></button>`)
+        .map((i) => `<button class="palette-item ${i.action === activeAction ? "active" : ""}" data-palette-action="${esc(i.action)}">${icon(i.iconName, 14)}<span class="ellipsis">${esc(i.label)}</span><span class="p-hint">${esc(i.hint)}</span></button>`)
         .join("")}`;
     })
     .join("");

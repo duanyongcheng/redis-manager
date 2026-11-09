@@ -122,8 +122,10 @@ export function connectionDialog(s: ViewState, draft: EditorDraft, testResult: {
               ${["standalone", "sentinel", "cluster"].map((m) => `<option value="${m}" ${draft.mode === m ? "selected" : ""}>${modeLabel(m)}</option>`).join("")}
             </select>
           </div>
-          ${draft.mode === "cluster" ? field("seedNodes", "种子节点", { full: true, placeholder: "10.0.0.1:6379, 10.0.0.2:6379" }) : ""}
-          ${draft.mode === "sentinel" ? field("sentinelMaster", "Sentinel 主库名", { full: true, placeholder: "mymaster" }) : ""}
+          <div id="connection-mode-fields" style="display:contents">
+            ${draft.mode === "cluster" ? field("seedNodes", "种子节点", { full: true, placeholder: "10.0.0.1:6379, 10.0.0.2:6379" }) : ""}
+            ${draft.mode === "sentinel" ? field("sentinelMaster", "Sentinel 主库名", { full: true, placeholder: "mymaster" }) : ""}
+          </div>
         </div>
         <div class="form-section">认证</div>
         <div class="field-grid">
@@ -141,7 +143,7 @@ export function connectionDialog(s: ViewState, draft: EditorDraft, testResult: {
             <span><span style="font-size:12px">只读连接</span><span class="hint" style="display:block">拦截 CLI 写命令</span></span>
           </label>
         </div>
-        ${testResult ? `<div class="test-result ${testResult.kind}">${esc(testResult.text)}</div>` : ""}
+        <div id="connection-test-result">${testResult ? `<div class="test-result ${testResult.kind}">${esc(testResult.text)}</div>` : ""}</div>
       </form>
       <div class="dialog-foot">
         <button class="btn" data-action="test-connection" type="button">${icon("zap", 13)} 测试连接</button>
