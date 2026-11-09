@@ -116,9 +116,10 @@ HTML 在隔离的 iframe 内预览，脚本及外部资源被禁用；依赖外�
 | `bun run typecheck` | TypeScript 类型检查 |
 | `bun run checks` | TypeScript 类型检查与 `go vet ./...` |
 | `bun run build:web` | 检查并构建前端到 `dist/` |
-| `bun run test:previews` | 运行 HTML / Markdown 预览浏览器回归 |
+| `bun run test:previews` | 运行预览、CLI 和编辑状态的浏览器回归 |
+| `bun run test:state` | 运行异步请求与连接、数据库、键切换的状态回归 |
 
-浏览器回归会启动临时 Vite 服务和独立的无界面 Chrome，使用合成数据验证 JSON 转义解码、表格样式、两轮实际轮询后的格式及滚动位置，以及键、数据库、连接切换；无需连接 Redis。
+浏览器回归会启动临时 Vite 服务和独立的无界面 Chrome，使用合成数据验证内容预览、轮询期间的草稿与焦点保留、连接编辑、命令历史及删除确认的目标。状态回归通过内存服务模拟乱序响应，验证旧读取、扫描、写入或保存结果不会覆盖新目标；两类测试均无需连接 Redis。
 
 ```bash
 # 运行回归，同时保存 HTML / Markdown 截图

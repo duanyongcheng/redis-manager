@@ -57,6 +57,12 @@ export interface ConnectionKey {
   encoding: string;
 }
 
+export interface KeyTarget {
+  connId: string;
+  db: number;
+  key: string;
+}
+
 export interface ViewState {
   page: PageId;
   /** Page for each connection so switching servers keeps the last tab. */
@@ -106,6 +112,11 @@ export interface ViewState {
 const HISTORY_LIMIT = 90;
 const keyOf = (connId: string) => connId;
 const overviewRequests = new Map<string, Promise<void>>();
+let browserContextVersion = 0;
+let scanRequestVersion = 0;
+let valueRequestVersion = 0;
+let keySelectionVersion = 0;
+let monitorRequestVersion = 0;
 
 export const state: ViewState = {
   page: "overview",
@@ -201,6 +212,39 @@ export function currentDb(conn: ConnectionView | null = currentConnection()): nu
   const selected = state.dbByConn[conn.id];
   if (typeof selected === "number" && Number.isInteger(selected) && selected >= 0) return selected;
   return Number.isInteger(conn.db) && conn.db >= 0 ? conn.db : 0;
+}
+
+function isCurrentDatabase(connId: string, db: number, version: number): boolean {
+  return browserContextVersion === version && currentConnection()?.id === connId && currentDb() === db;
+}
+
+function selectKey(key: string | null) {
+  if (state.selectedKey === key) return;
+  keySelectionVersion += 1;
+  valueRequestVersion += 1;
+  state.selectedKey = key;
+  state.value = null;
+  state.valueMode = "raw";
+  state.valueLoading = false;
+  state.valueError = "";
+}
+
+// A request belongs to one visit to a database, including a switch away and back.
+function resetBrowserContext() {
+  browserContextVersion += 1;
+  scanRequestVersion += 1;
+  valueRequestVersion += 1;
+  keySelectionVersion += 1;
+  state.selectedKey = null;
+  state.valueMode = "raw";
+  state.value = null;
+  state.valueLoading = false;
+  state.valueError = "";
+  state.keys = [];
+  state.keyDone = false;
+  state.keyCursor = 0;
+  state.keyScanned = 0;
+  state.scanning = false;
 }
 
 export function availableDatabases(conn: ConnectionView | null = currentConnection()): number[] {
@@ -342,6 +386,7 @@ export async function refreshConnections(): Promise<void> {
     state.globalError = "";
     if (!state.connId || !state.connections.some((c) => c.id === state.connId)) {
       state.connId = state.connections[0]?.id ?? null;
+      resetBrowserContext();
     }
   } catch (error) {
     state.globalError = errorMessage(error);
@@ -370,19 +415,20 @@ export function loadOverview(): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return Promise.resolve();
   const db = currentDb(conn);
-  const requestKey = `${conn.id}:${db}`;
+  const version = browserContextVersion;
+  const requestKey = JSON.stringify([version, conn.id, db]);
   const inFlight = overviewRequests.get(requestKey);
   if (inFlight) return inFlight;
 
-  const request = loadOverviewRequest(conn, db, requestKey);
+  const request = loadOverviewRequest(conn, db, version, requestKey);
   overviewRequests.set(requestKey, request);
   return request;
 }
 
-async function loadOverviewRequest(conn: ConnectionView, db: number, requestKey: string): Promise<void> {
+async function loadOverviewRequest(conn: ConnectionView, db: number, version: number, requestKey: string): Promise<void> {
   try {
     const overview = await redis.getOverview(conn.id, db);
-    if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
+    if (!isCurrentDatabase(conn.id, db, version)) return;
     const prevInfo = state.overview[conn.id]?.info;
     const netIn = diff(overview.info["total_net_input_bytes"], prevInfo?.["total_net_input_bytes"]);
     const netOut = diff(overview.info["total_net_output_bytes"], prevInfo?.["total_net_output_bytes"]);
@@ -395,6 +441,7 @@ async function loadOverviewRequest(conn: ConnectionView, db: number, requestKey:
       error: undefined,
     });
   } catch (error) {
+    if (!isCurrentDatabase(conn.id, db, version)) return;
     updateConn(conn.id, { status: "off", error: errorMessage(error) });
   } finally {
     overviewRequests.delete(requestKey);
@@ -417,15 +464,19 @@ export async function loadMonitor(): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return;
   const db = currentDb(conn);
+  const version = browserContextVersion;
+  const request = ++monitorRequestVersion;
+  const isCurrent = () => request === monitorRequestVersion && isCurrentDatabase(conn.id, db, version);
   try {
     const snapshot = await redis.getMonitorSnapshot(conn.id, db);
-    if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
+    if (!isCurrent()) return;
     state.monitor[conn.id] = snapshot;
     const prevInfo = state.overview[conn.id]?.info;
     state.overview[conn.id] = snapshot.overview;
     pushSample(conn.id, snapshot.overview, diff(snapshot.overview.info["total_net_input_bytes"], prevInfo?.["total_net_input_bytes"]), diff(snapshot.overview.info["total_net_output_bytes"], prevInfo?.["total_net_output_bytes"]));
     updateConn(conn.id, { status: "on", version: snapshot.overview.info["redis_version"] ?? conn.version, latencyMs: snapshot.overview.latencyMs });
   } catch (error) {
+    if (!isCurrent()) return;
     updateConn(conn.id, { status: "off", error: errorMessage(error) });
     toast("err", "监控数据读取失败", errorMessage(error));
   }
@@ -435,16 +486,14 @@ export async function loadMonitor(): Promise<void> {
 export async function selectConnection(id: string) {
   state.connId = id;
   state.page = state.pageByConn[id] ?? "overview";
-  state.selectedKey = null;
-  state.valueMode = "raw";
-  state.value = null;
-  state.keys = [];
-  state.keyDone = false;
-  state.keyCursor = 0;
+  resetBrowserContext();
+  const version = browserContextVersion;
+  const db = currentDb();
   state.sidebarOpen = false;
   notify();
   if (state.page === "monitor") await loadMonitor();
   else await loadOverview();
+  if (!isCurrentDatabase(id, db, version)) return;
   if (state.page === "browser") void scanKeys({ reset: true });
 }
 
@@ -454,16 +503,8 @@ export async function selectDatabase(db: number) {
   if (!conn || !Number.isFinite(next) || next < 0 || (conn.mode.toLowerCase() === "cluster" && next !== 0)) return;
   if (currentDb(conn) === next) return;
   state.dbByConn = { ...state.dbByConn, [conn.id]: next };
-  state.selectedKey = null;
-  state.valueMode = "raw";
-  state.value = null;
-  state.valueLoading = false;
-  state.valueError = "";
-  state.keys = [];
-  state.keyDone = false;
-  state.keyCursor = 0;
-  state.keyScanned = 0;
-  state.scanning = false;
+  resetBrowserContext();
+  const version = browserContextVersion;
   delete state.overview[conn.id];
   delete state.monitor[conn.id];
   delete state.history[conn.id];
@@ -472,7 +513,7 @@ export async function selectDatabase(db: number) {
   notify();
   if (state.page === "monitor") await loadMonitor();
   else await loadOverview();
-  if (currentConnection()?.id !== conn.id || currentDb(conn) !== next) return;
+  if (!isCurrentDatabase(conn.id, next, version)) return;
   if (state.page === "browser") void scanKeys({ reset: true });
 }
 
@@ -495,9 +536,12 @@ export async function testConnection(conn: ConnectionView) {
 
 export async function scanKeys(options: { reset?: boolean; append?: boolean } = {}): Promise<void> {
   const conn = currentConnection();
-  if (!conn || !api.available || state.scanning) return;
-  const db = currentDb(conn);
   const reset = options.reset || !options.append;
+  if (!conn || !api.available || (state.scanning && !reset)) return;
+  const db = currentDb(conn);
+  const version = browserContextVersion;
+  const request = ++scanRequestVersion;
+  const isCurrent = () => request === scanRequestVersion && isCurrentDatabase(conn.id, db, version);
   state.scanning = true;
   if (reset) {
     state.keyCursor = 0;
@@ -508,63 +552,77 @@ export async function scanKeys(options: { reset?: boolean; append?: boolean } = 
   try {
     const count = settings.get("scanCount");
     const page: KeyPage = await redis.scanKeys(conn.id, db, state.keyPattern || "*", reset ? 0 : state.keyCursor, count);
-    if (currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
-    const seen = new Set(state.keys.map((k) => k.key));
-    const merged = [...(state.keys ?? []), ...(page.keys ?? []).filter((k) => !seen.has(k.key))];
+    if (!isCurrent()) return;
+    const merged = reset ? [] : [...state.keys];
+    const seen = new Set(merged.map((k) => k.key));
+    for (const key of page.keys ?? []) {
+      if (!seen.has(key.key)) merged.push(key);
+      seen.add(key.key);
+    }
     state.keys = merged.slice(0, 2000);
     state.keyCursor = page.cursor;
     state.keyDone = page.done || merged.length >= 2000;
     state.keyScanned += page.keys?.length ?? 0;
     if (state.selectedKey && !state.keys.some((k) => k.key === state.selectedKey)) {
-      state.selectedKey = state.keys[0]?.key ?? null;
+      selectKey(state.keys[0]?.key ?? null);
     }
-    if (!state.selectedKey && state.keys[0]) state.selectedKey = state.keys[0].key;
+    if (!state.selectedKey && state.keys[0]) selectKey(state.keys[0].key);
   } catch (error) {
+    if (!isCurrent()) return;
     toast("err", "SCAN 失败", errorMessage(error));
     state.keyDone = true;
   } finally {
-    state.scanning = false;
-    notify();
+    if (isCurrent()) {
+      state.scanning = false;
+      notify();
+    }
   }
-  if (state.selectedKey && !state.value) void openKey(state.selectedKey);
+  if (isCurrent() && state.selectedKey && !state.value && !state.valueLoading) void openKey(state.selectedKey);
 }
 
 export async function openKey(key: string): Promise<void> {
   const conn = currentConnection();
   if (!conn || !api.available) return;
   const db = currentDb(conn);
-  if (state.selectedKey !== key) state.valueMode = "raw";
-  state.selectedKey = key;
+  const version = browserContextVersion;
+  selectKey(key);
+  const request = ++valueRequestVersion;
+  const isCurrent = () => request === valueRequestVersion && state.selectedKey === key && isCurrentDatabase(conn.id, db, version);
   state.valueLoading = true;
   state.valueError = "";
   notify();
   try {
     const value = await redis.getValue(conn.id, db, key);
-    if (state.selectedKey !== key || currentConnection()?.id !== conn.id || currentDb(conn) !== db) return;
+    if (!isCurrent()) return;
     state.value = value;
   } catch (error) {
+    if (!isCurrent()) return;
     state.valueError = errorMessage(error);
     state.value = null;
   } finally {
-    state.valueLoading = false;
-    notify();
+    if (isCurrent()) {
+      state.valueLoading = false;
+      notify();
+    }
   }
 }
 
-export async function deleteSelectedKey(): Promise<void> {
+export async function deleteSelectedKey(target?: KeyTarget): Promise<void> {
   const conn = currentConnection();
   const value = state.value;
-  if (!conn || !value) return;
-  const db = currentDb(conn);
+  const selected = target ?? (conn && value ? { connId: conn.id, db: currentDb(conn), key: value.key } : null);
+  if (!selected || !api.available) return;
+  const { connId, db, key } = selected;
+  const version = browserContextVersion;
   try {
-    await redis.deleteKey(conn.id, db, value.key);
-    toast("ok", `已删除 ${value.key}`);
-    state.value = null;
-    state.selectedKey = null;
-    state.valueMode = "raw";
-    state.keys = state.keys.filter((k) => k.key !== value.key);
+    await redis.deleteKey(connId, db, key);
+    toast("ok", `已删除 ${key}`);
+    if (!isCurrentDatabase(connId, db, version)) return;
+    scanRequestVersion += 1;
+    state.scanning = false;
+    if (state.selectedKey === key) selectKey(null);
+    state.keys = state.keys.filter((k) => k.key !== key);
     notify();
-    await scanKeys({ reset: true });
   } catch (error) {
     toast("err", "删除失败", errorMessage(error));
   }
@@ -573,12 +631,19 @@ export async function deleteSelectedKey(): Promise<void> {
 export async function saveHashField(field: string, value: string): Promise<boolean> {
   const conn = currentConnection();
   const current = state.value;
-  if (!conn || !current) return false;
+  if (!conn || !current || current.type !== "hash" || state.selectedKey !== current.key || !api.available) return false;
   const db = currentDb(conn);
+  const version = browserContextVersion;
+  const selection = keySelectionVersion;
   try {
     await redis.hashSet(conn.id, db, current.key, field, value);
-    state.value = { ...current, hash: { ...(current.hash ?? {}), [field]: value } };
-    notify();
+    if (isCurrentDatabase(conn.id, db, version) && selection === keySelectionVersion && state.selectedKey === current.key && state.value?.key === current.key && state.value.type === "hash") {
+      valueRequestVersion += 1;
+      state.valueLoading = false;
+      state.valueError = "";
+      state.value = { ...state.value, hash: { ...(state.value.hash ?? {}), [field]: value } };
+      notify();
+    }
     toast("ok", "字段已写入", `${current.key} · ${field}`);
     return true;
   } catch (error) {
@@ -630,11 +695,23 @@ export function setCliReadOnly(readOnly: boolean) {
 
 export async function saveConnection(conn: Connection, password: string): Promise<boolean> {
   if (!api.available) return false;
+  const editor = state.connectionEditor;
+  const version = browserContextVersion;
+  const selectedId = state.connId;
+  const selectedDb = currentDb();
+  let savedVersion: number | null = null;
   try {
     await redis.saveConnection(conn, password);
-    state.connId = conn.id;
-    state.connectionEditor = null;
+    if (state.connectionEditor === editor && browserContextVersion === version && state.connId === selectedId && currentDb() === selectedDb) {
+      state.connId = conn.id;
+      state.connectionEditor = null;
+      resetBrowserContext();
+      savedVersion = browserContextVersion;
+    }
     await refreshConnections();
+    if (savedVersion != null && isCurrentDatabase(conn.id, currentDb(), savedVersion) && state.page === "browser") {
+      void scanKeys({ reset: true });
+    }
     notify();
     toast("ok", "连接已保存", `${conn.name} · ${conn.host}:${conn.port}`);
     return true;
@@ -653,7 +730,10 @@ export async function removeConnection(id: string) {
     delete state.history[id];
     delete state.monitor[id];
     delete state.cliSessions[id];
-    if (state.connId === id) state.connId = state.connections[0]?.id ?? null;
+    if (state.connId === id) {
+      state.connId = state.connections[0]?.id ?? null;
+      resetBrowserContext();
+    }
     notify();
     toast("ok", "连接已删除");
   } catch (error) {

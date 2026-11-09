@@ -50,9 +50,12 @@ interface LocalUi {
   themeMenu: boolean;
   testResult: { kind: "ok" | "err"; text: string } | null;
   draft: EditorDraft | null;
+  editor: ViewState["connectionEditor"];
+  paletteQuery: string;
+  paletteAction: string;
 }
 
-const ui: LocalUi = { windowSize: 60, themeMenu: false, testResult: null, draft: null };
+const ui: LocalUi = { windowSize: 60, themeMenu: false, testResult: null, draft: null, editor: null, paletteQuery: "", paletteAction: "" };
 
 const root = document.getElementById("root")!;
 
@@ -72,9 +75,23 @@ const PAGE_VIEWS: Record<PageId, (s: ViewState) => string> = {
 let scrollMemo: Record<string, number> = {};
 let hasPaintedApp = false;
 let renderedContext = "";
+let renderedKey: string | null = null;
+let renderedEditor: ViewState["connectionEditor"] = null;
+let renderedEditorMode: string | undefined;
+let testRequest = 0;
+const pendingSelectUpdates = new WeakMap<HTMLSelectElement, HTMLSelectElement>();
+const hashEditVersions = new WeakMap<HTMLFormElement, number>();
 
-// Keep the connected value subtree when only the surrounding metrics change.
-// Detaching and reinserting an iframe would reload its document and scroll.
+function applySelectOptions(previous: HTMLSelectElement, next: HTMLSelectElement) {
+  const value = next.value;
+  previous.replaceChildren(...Array.from(next.childNodes));
+  previous.value = value;
+  previous.disabled = next.disabled;
+  pendingSelectUpdates.delete(previous);
+}
+
+// Keep interactive subtrees connected when only the surrounding metrics change.
+// Replacing them would reset iframe documents or interrupt CLI input and focus.
 function updateRenderedApp(html: string, context: string) {
   if (!hasPaintedApp) {
     root.innerHTML = html;
@@ -86,16 +103,69 @@ function updateRenderedApp(html: string, context: string) {
       const next = template.content.querySelector(selector);
       if (previous && next && (replace || !previous.isEqualNode(next))) previous.replaceWith(next);
     };
-    for (const selector of [".topbar", ".sidebar", ".tabs", ".data-context", ".statusbar", ".app-overlays"]) updateRegion(selector);
+    const updateSelect = (selector: string) => {
+      const previous = root.querySelector<HTMLSelectElement>(selector);
+      const next = template.content.querySelector<HTMLSelectElement>(selector);
+      if (!previous || !next) return;
+      if (previous.isEqualNode(next)) {
+        pendingSelectUpdates.delete(previous);
+      } else if (document.activeElement === previous) {
+        // Updating native options can close an open picker even if the select stays connected.
+        pendingSelectUpdates.set(previous, next);
+      } else {
+        applySelectOptions(previous, next);
+      }
+    };
+    for (const selector of [".topbar", ".sidebar", ".tabs", ".statusbar"]) updateRegion(selector);
+    if (root.querySelector("[data-connection-select]") && template.content.querySelector("[data-connection-select]")) {
+      updateSelect("[data-connection-select]");
+      updateSelect("[data-db-select]");
+      updateRegion(".data-context-address");
+      updateRegion(".data-context-mode");
+    } else {
+      updateRegion(".data-context");
+    }
+    if (root.querySelector("#palette-input") && template.content.querySelector("#palette-input")) {
+      updateRegion("#palette-list");
+    } else {
+      updateRegion('[data-overlay="palette"]');
+    }
+    if (state.connectionEditor && state.connectionEditor === renderedEditor && root.querySelector("#connection-form") && template.content.querySelector("#connection-form")) {
+      if (ui.draft?.mode !== renderedEditorMode) updateRegion("#connection-mode-fields");
+      updateRegion("#connection-test-result");
+    } else {
+      updateRegion('[data-overlay="editor"]');
+    }
+    for (const name of ["theme", "confirm", "toasts"]) updateRegion(`[data-overlay="${name}"]`);
     if (context === renderedContext && state.page === "browser" && root.querySelector(".browser") && template.content.querySelector(".browser")) {
-      updateRegion(".browser-keys");
-      updateRegion(".browser-value");
+      for (const selector of [".browser-keys .card-meta", ".browser-chips", ".key-list", ".browser-foot"]) updateRegion(selector);
+      if (state.selectedKey === renderedKey && state.value?.key === state.selectedKey && root.querySelector("#hash-form") && template.content.querySelector("#hash-form")) {
+        updateRegion(".value-head");
+        updateRegion(".value-body > .tbl");
+        updateRegion(".value-foot");
+      } else {
+        updateRegion(".browser-value");
+      }
+    } else if (context === renderedContext && state.page === "cli" && root.querySelector(".cli") && template.content.querySelector(".cli")) {
+      updateRegion(".cli-bar");
+      updateRegion("#cli-log");
+      updateRegion(".cli-suggest");
+      updateRegion(".cli-prompt .prompt");
+    } else if (context === renderedContext && state.page === "settings" && root.querySelector(".settings") && template.content.querySelector(".settings")) {
+      updateRegion(".settings-theme");
+      updateRegion(".settings-about");
+      updateRegion('.settings [data-action="set-key-grouping"]');
+      updateRegion('.settings [data-action="set-cli-readonly"]');
+      for (const name of ["scanCount", "maxValueBytes", "cliHistoryLimit"]) updateSelect(`[data-setting="${name}"]`);
     } else {
       updateRegion(".content", true);
     }
     root.querySelector(".app")?.classList.remove("app-enter");
   }
   renderedContext = context;
+  renderedKey = state.selectedKey;
+  renderedEditor = state.connectionEditor;
+  renderedEditorMode = ui.draft?.mode;
   hasPaintedApp = true;
 }
 
@@ -111,6 +181,8 @@ function pageBody(s: ViewState): string {
 function render() {
   const s = state;
   const conn = currentConnection();
+  syncEditorDraft();
+  const hadPalette = Boolean(root.querySelector("#palette-input"));
   // Preserve the scroll offset of the page container across re-renders.
   const prevContent = root.querySelector<HTMLElement>(".content");
   if (prevContent && s.page) scrollMemo[`${s.page}:${s.connId}`] = prevContent.scrollTop;
@@ -135,14 +207,14 @@ function render() {
       ${statusbar(s)}
     </div>
     <div class="app-overlays">
-      ${palette(s)}
-      ${s.connectionEditor ? connectionDialog(s, ui.draft ?? editorDraft(s), ui.testResult) : ""}
-      ${ui.themeMenu ? themeMenu(s) : ""}
-      ${confirmModal(s)}
-      ${toasts(s)}
+      <div data-overlay="palette">${palette(s, ui.paletteQuery, ui.paletteAction)}</div>
+      <div data-overlay="editor">${s.connectionEditor ? connectionDialog(s, ui.draft!, ui.testResult) : ""}</div>
+      <div data-overlay="theme">${ui.themeMenu ? themeMenu(s) : ""}</div>
+      <div data-overlay="confirm">${confirmModal(s)}</div>
+      <div data-overlay="toasts">${toasts(s)}</div>
     </div>`;
 
-  updateRenderedApp(html, JSON.stringify([s.page, conn?.id, currentDb(conn)]));
+  updateRenderedApp(html, JSON.stringify([s.page, conn?.id, currentDb(conn), s.page === "cli" ? activeCliSession()?.id : null]));
   document.title = conn ? `Redis Manager — ${conn.name || conn.host}` : "Redis Manager";
 
   // restore scrolls
@@ -157,8 +229,7 @@ function render() {
   if (keyList && scrollMemo["keys"]) keyList.scrollTop = scrollMemo["keys"]!;
 
   bindCharts(root);
-  if (s.paletteOpen) focusPalette();
-  if (s.connectionEditor) fillDraft();
+  if (s.paletteOpen && !hadPalette) focusPalette();
   updateAsciiBars();
   updateThemeMeta();
   document.documentElement.dataset.page = s.page;
@@ -237,15 +308,12 @@ function themeMenu(s: ViewState): string {
 /* Editor form helpers                                                 */
 /* ------------------------------------------------------------------ */
 
-function fillDraft() {
-  const s = state;
-  const draft = ui.draft ?? editorDraft(s);
-  ui.draft = draft;
-  root.querySelectorAll<HTMLInputElement>("[data-field]").forEach((input) => {
-    const name = input.dataset.field as keyof EditorDraft;
-    const value = draft[name];
-    input.value = value == null || value === false ? (name === "password" ? "" : String(value ?? "")) : String(value);
-  });
+function syncEditorDraft() {
+  if (ui.editor === state.connectionEditor) return;
+  ui.editor = state.connectionEditor;
+  ui.draft = ui.editor ? editorDraft(state) : null;
+  ui.testResult = null;
+  testRequest += 1;
 }
 
 function readDraft(): EditorDraft {
@@ -266,6 +334,9 @@ function draftConnection(draft: EditorDraft): EditorDraft {
 }
 
 async function onTestConnection() {
+  const editor = state.connectionEditor;
+  if (!editor) return;
+  const request = ++testRequest;
   const draft = readDraft();
   if (!state.serviceAvailable) {
     ui.testResult = { kind: "err", text: "Go 服务不可用，无法测试连接。" };
@@ -282,17 +353,21 @@ async function onTestConnection() {
   render();
   try {
     const result = await redis.testConnection(conn as never, draft.password ?? "");
+    if (state.connectionEditor !== editor || request !== testRequest) return;
     ui.testResult =
       result.status === "ok"
         ? { kind: "ok", text: `连接成功 · ${result.version || "Redis"} · ${result.latencyMs.toFixed(1)} ms · ${result.mode || conn.mode}` }
         : { kind: "err", text: result.message || "连接失败" };
   } catch (error) {
+    if (state.connectionEditor !== editor || request !== testRequest) return;
     ui.testResult = { kind: "err", text: errorMessage(error) };
   }
   render();
 }
 
 async function onSaveConnection() {
+  const editor = state.connectionEditor;
+  if (!editor) return;
   const draft = readDraft();
   const conn = draftConnection(draft);
   if (!conn.name.trim()) conn.name = `${conn.host}:${conn.port}`;
@@ -302,7 +377,7 @@ async function onSaveConnection() {
     return;
   }
   const ok = await saveConnection(conn as never, draft.password ?? "");
-  if (ok) {
+  if (ok && state.connectionEditor === editor) {
     ui.draft = null;
     ui.testResult = null;
     patch({ connectionEditor: null });
@@ -320,11 +395,17 @@ function openEditor(mode: "new" | "edit", id?: string) {
 /* ------------------------------------------------------------------ */
 
 function openPalette() {
+  if (!state.paletteOpen) {
+    ui.paletteQuery = "";
+    ui.paletteAction = "";
+  }
   patch({ paletteOpen: true });
 }
 
 function closePalette() {
   if (!state.paletteOpen) return;
+  ui.paletteQuery = "";
+  ui.paletteAction = "";
   patch({ paletteOpen: false });
 }
 
@@ -375,13 +456,15 @@ const actions: Record<string, () => void | Promise<void>> = {
   },
   "delete-key": () => {
     const value = state.value;
-    if (!value) return;
+    const conn = currentConnection();
+    if (!value || !conn) return;
+    const target = { connId: conn.id, db: currentDb(conn), key: value.key };
     confirmDialog({
       title: "删除键",
       body: `确认删除 ${value.key}？此操作不可恢复，删除后所有客户端立即不可见。`,
       confirmLabel: "删除",
       danger: true,
-      onConfirm: () => void deleteSelectedKey(),
+      onConfirm: () => void deleteSelectedKey(target),
     });
   },
   "confirm-cancel": () => patch({ confirm: null }),
@@ -611,7 +694,17 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("input", (event) => {
   const target = event.target as HTMLInputElement;
+  if (target.matches("#connection-form [data-field]")) {
+    readDraft();
+    return;
+  }
+  if (target.form?.id === "hash-form") {
+    hashEditVersions.set(target.form, (hashEditVersions.get(target.form) ?? 0) + 1);
+    return;
+  }
   if (target.id === "palette-input") {
+    ui.paletteQuery = target.value;
+    ui.paletteAction = "";
     const list = document.getElementById("palette-list");
     if (list) list.innerHTML = paletteList(state, target.value);
     return;
@@ -636,6 +729,11 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
+  if (target.matches("#connection-form [data-field]")) {
+    readDraft();
+    if (target.dataset.field === "mode") render();
+    return;
+  }
   if (target.dataset.connectionSelect != null) {
     void selectConnection(target.value);
     return;
@@ -651,6 +749,13 @@ document.addEventListener("change", (event) => {
   }
 });
 
+document.addEventListener("focusout", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement)) return;
+  const pending = pendingSelectUpdates.get(target);
+  if (pending && target.isConnected) applySelectOptions(target, pending);
+});
+
 document.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
   event.preventDefault();
@@ -661,6 +766,7 @@ document.addEventListener("submit", (event) => {
     if (!input?.value.trim()) return;
     const value = input.value;
     input.value = "";
+    delete input.dataset.hist;
     void runCli(value);
     return;
   }
@@ -669,8 +775,11 @@ document.addEventListener("submit", (event) => {
     const field = String(data.get("field") ?? "").trim();
     const value = String(data.get("value") ?? "");
     if (!field) return;
+    const editVersion = hashEditVersions.get(form) ?? 0;
     void saveHashField(field, value).then((ok) => {
-      if (ok) form.reset();
+      if (!ok || !form.isConnected || (hashEditVersions.get(form) ?? 0) !== editVersion) return;
+      const current = new FormData(form);
+      if (String(current.get("field") ?? "").trim() === field && String(current.get("value") ?? "") === value) form.reset();
     });
     return;
   }
@@ -727,13 +836,14 @@ document.addEventListener("keydown", (event) => {
   }
 
   if (state.paletteOpen) {
-    const items = Array.from(root.querySelectorAll<HTMLElement>(".palette-item"));
+    const items = Array.from(root.querySelectorAll<HTMLElement>("#palette-list .palette-item"));
     const current = items.findIndex((el) => el.classList.contains("active"));
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const dir = event.key === "ArrowDown" ? 1 : -1;
       const next = (current + dir + items.length) % Math.max(1, items.length);
       items.forEach((el, i) => el.classList.toggle("active", i === next));
+      ui.paletteAction = items[next]?.dataset.paletteAction ?? "";
       items[next]?.scrollIntoView({ block: "nearest" });
       return;
     }
@@ -753,6 +863,7 @@ document.addEventListener("keydown", (event) => {
       if (input.value.trim()) {
         const value = input.value;
         input.value = "";
+        delete input.dataset.hist;
         void runCli(value);
       }
       return;

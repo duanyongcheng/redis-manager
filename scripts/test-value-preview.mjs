@@ -1,4 +1,4 @@
-/** Browser regressions for preview decoding and persistence. No Redis is used.
+/** Browser regressions for previews, CLI input and application state. No Redis is used.
  * Run: node scripts/test-value-preview.mjs [screenshot-directory]
  * CHROME_BIN can select a different locally installed Chromium executable.
  */
@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
+import { testRefreshState } from "./test-refresh-state.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const chromePath = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -107,6 +108,7 @@ try {
   const fixtureScript = await send("Page.addScriptToEvaluateOnNewDocument", { source: `
     window.__previewValues = ${JSON.stringify(values)};
     window.__overviewCalls = 0;
+    window.__cliCalls = [];
     window.__appInfo = {version: "1.7.8", isDev: false, updatesEnabled: true};
     window.__updateChecks = 0;
     window.AppService = {
@@ -124,6 +126,11 @@ try {
       getOverview: async () => ({atMs: Date.now(), opsPerSec: ++window.__overviewCalls, connectedClients: 1, usedMemoryBytes: 1024, maxMemoryBytes: 8192, latencyMs: 1, totalKeys: keys.length, keyspaces: [{db: 0, keys: keys.length, expires: 0, avgTtlMs: 0}], commands: [], info: {redis_version: "test"}}),
       scanKeys: async () => ({keys, cursor: 0, done: true}),
       getValue: async (_id, _db, key) => ({...keys.find(item => item.key === key), stringValue: window.__previewValues[key]}),
+      execCLI: async (id, db, command, readOnly) => {
+        window.__cliCalls.push({id, db, command, readOnly});
+        if (window.__holdCli) await new Promise(resolve => { window.__finishCli = resolve; });
+        return {lines: [{kind: 'string', text: 'result: ' + command}]};
+      },
     };
   ` });
   await send("Page.navigate", { url: `${url}/?page=browser&theme=airy&scheme=dark` });
@@ -225,6 +232,83 @@ try {
   await until(() => evaluate("window.__RM_STATE__.connId === 'second'"), "connection change");
   assert.equal(await evaluate("window.__RM_STATE__.valueMode"), "raw", "connection change resets preview mode");
 
+  // The command prompt must remain connected while background data changes.
+  await evaluate("document.querySelector('[data-nav=cli]').click()");
+  await until(() => evaluate("Boolean(document.querySelector('#cli-input'))"), "CLI prompt");
+  await evaluate("document.querySelector('#cli-input').focus()");
+  await send("Input.insertText", { text: 'GET "pending:草稿"' });
+  await evaluate("window.__keptCliInput = document.querySelector('#cli-input'); window.__keptCliInput.setSelectionRange(4, 11, 'backward'); window.__cliPollStart = window.__overviewCalls");
+  const cliInputState = () => evaluate(`(() => {
+    const input = document.querySelector('#cli-input');
+    return {sameNode: input === window.__keptCliInput && input.isConnected, focused: document.activeElement === input,
+      value: input.value, start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection};
+  })()`);
+  const pendingInput = await cliInputState();
+  assert.equal(pendingInput.value, 'GET "pending:草稿"');
+  await until(() => evaluate("window.__overviewCalls >= window.__cliPollStart + 2"), "two CLI polling intervals", 11000);
+  assert.deepEqual(await cliInputState(), pendingInput, "polling preserves the CLI draft, connected input, focus and selection");
+  assert.equal(await evaluate("document.querySelector('.statusbar').textContent.includes(String(window.__overviewCalls))"), true, "metrics continue updating while typing");
+  assert.deepEqual(await evaluate("window.__cliCalls"), [], "polling never executes a pending command");
+
+  await evaluate(`import('/src/core/store.ts').then(store => {
+    store.setCliReadOnly(false);
+    store.clearCliLog();
+    store.toast('info', 'CLI regression notification');
+    window.__RM_SETTINGS__.patch({theme: 'console', scheme: 'dark'});
+  })`);
+  assert.deepEqual(await cliInputState(), pendingInput, "mode, clear, notification and theme updates preserve the draft");
+  await evaluate("document.querySelector('[data-fill=DBSIZE]').click()");
+  await evaluate("import('/src/core/store.ts').then(store => store.loadOverview())");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "DBSIZE", "suggested commands survive refresh before execution");
+  await evaluate("document.querySelector('#cli-form').requestSubmit()");
+  await until(() => evaluate("document.querySelector('#cli-log').textContent.includes('result: DBSIZE')"), "CLI form result");
+  assert.equal(await evaluate("window.__cliCalls.length"), 1, "form submission executes exactly once");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "submission clears the executed command");
+
+  await evaluate("document.querySelector('#cli-input').focus()");
+  await send("Input.insertText", { text: "PING" });
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await until(() => evaluate("document.querySelector('#cli-log').textContent.includes('result: PING')"), "CLI Enter result");
+  assert.equal(await evaluate("window.__cliCalls.length"), 2, "Enter executes exactly once");
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowUp", code: "ArrowUp" });
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "PING", "history starts with the latest command");
+  await evaluate("import('/src/core/store.ts').then(store => store.loadOverview())");
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowUp", code: "ArrowUp" });
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "DBSIZE", "history cursor survives a background refresh");
+  await evaluate("document.querySelector('#cli-form').requestSubmit()");
+  await until(() => evaluate("window.__cliCalls.length === 3"), "recalled command submission");
+  assert.equal(await evaluate("document.querySelector('#cli-input').dataset.hist ?? null"), null, "form submission resets history navigation");
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowUp", code: "ArrowUp" });
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "DBSIZE", "history restarts from the latest submitted command");
+
+  await evaluate("window.__holdCli = true");
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await until(() => evaluate("window.__cliCalls.length === 4 && Boolean(window.__finishCli)"), "pending CLI response");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "Enter clears the recalled command");
+  assert.equal(await evaluate("document.querySelector('#cli-input').dataset.hist ?? null"), null, "Enter resets history navigation");
+  await send("Input.insertText", { text: "GET next-command" });
+  const nextInput = await cliInputState();
+  await evaluate("window.__holdCli = false; window.__finishCli()");
+  await until(() => evaluate("window.__RM_STATE__.cliSessions.second[0].lines.at(-1).lines.length > 0"), "delayed CLI result");
+  assert.deepEqual(await cliInputState(), nextInput, "a previous command response preserves the next draft and focus");
+
+  await evaluate("document.querySelector('[data-action=new-cli-session]').click()");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "new sessions do not inherit a pending command");
+  await evaluate("document.querySelector('#cli-input').value = 'GET session-two'; document.querySelector('[data-cli-session=\"0\"]').click()");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "switching sessions does not carry the other session's command");
+  await evaluate("document.querySelector('#cli-input').value = 'GET previous-db'; const select = document.querySelector('[data-db-select]'); select.value = '1'; select.dispatchEvent(new Event('change', {bubbles:true}))");
+  await until(() => evaluate("window.__RM_STATE__.dbByConn.second === 1"), "CLI database change");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "database changes do not carry commands into another database");
+  await evaluate("document.querySelector('#cli-input').value = 'GET previous-connection'; window.__RM_STATE__.pageByConn.preview = 'cli'; document.querySelector('[data-conn=preview]').click()");
+  await until(() => evaluate("window.__RM_STATE__.connId === 'preview' && Boolean(document.querySelector('#cli-input'))"), "CLI connection change");
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "connection changes do not carry commands into another connection");
+  assert.deepEqual(await evaluate("window.__cliCalls.map(({id, db, command}) => ({id, db, command}))"), [
+    {id: "second", db: 0, command: "DBSIZE"}, {id: "second", db: 0, command: "PING"},
+    {id: "second", db: 0, command: "DBSIZE"}, {id: "second", db: 0, command: "DBSIZE"},
+  ], "only explicitly submitted commands reach the selected Redis context");
+
   // Application metadata and update dispatch do not depend on a Redis key.
   await evaluate("document.querySelector('[data-nav=settings]').click()");
   await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]'))"), "update settings");
@@ -250,13 +334,15 @@ try {
     await writeFile(join(screenshots, "update-settings.png"), Buffer.from(shot.data, "base64"));
   }
 
+  await testRefreshState({ evaluate, send, until });
+
   await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: fixtureScript.identifier });
   await send("Page.navigate", { url: `${url}/?page=settings` });
   await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]')) && !window.__RM_STATE__.appInfoLoading"), "ordinary browser settings");
   assert.equal(await evaluate("document.querySelector('[data-action=check-updates]').disabled"), true, "browser without a native bridge cannot check updates");
   assert.ok((await evaluate("document.querySelector('[data-update-status]').textContent")).includes("浏览器预览"));
   assert.deepEqual(exceptions, [], "no browser runtime errors");
-  console.log("PASS: value previews, polling/scroll preservation, source styles, runtime version, update dispatch/errors and disabled/browser update states");
+  console.log("PASS: value previews, CLI draft/focus/history/context preservation, polling/scroll preservation, source styles, runtime version, update dispatch/errors and disabled/browser update states");
 } finally {
   ws?.close();
   if (chrome && chrome.exitCode === null) {
