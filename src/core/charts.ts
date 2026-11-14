@@ -99,6 +99,8 @@ export interface LineChartOptions {
   xLabels?: string[];
   showLegend?: boolean;
   legendExtra?: string;
+  /** Index in the series to mark (an event onset or the inspected sample). */
+  marker?: { index: number; label: string; tone?: "warn" | "err" | "focus" } | null;
 }
 
 /** Multi-series line chart with hover crosshair. */
@@ -110,6 +112,10 @@ export function lineChart(options: LineChartOptions): string {
   const padR = 14;
   const padT = 14;
   const padB = 26;
+  // The svg is laid out at its own aspect, never stretched: a stretched plot
+  // distorts every value it draws. Its height is the drawing height, so the
+  // caller's box grows to include it rather than clipping it.
+  const svgHeight = h;
   const all = series.flatMap((s) => s.values);
   if (all.length === 0) {
     return `<div class="chart-empty" style="height:${h}px">等待采样…</div>`;
@@ -140,9 +146,10 @@ export function lineChart(options: LineChartOptions): string {
   for (let t = 0; t <= ticks; t += 1) {
     const value = left.min + (leftSpan * t) / ticks;
     const yy = y(value).toFixed(1);
-    grid += `<line class="chart-grid" x1="${padL}" x2="${w - padR}" y1="${yy}" y2="${yy}"/>`;
+    grid += `<line x1="${padL}" x2="${w - padR}" y1="${yy}" y2="${yy}" vector-effect="non-scaling-stroke"/>`;
     grid += `<text class="chart-tick" x="${padL - 8}" y="${yy}" text-anchor="end" dominant-baseline="middle">${fmtTick(value)}</text>`;
   }
+  grid = `<g class="chart-grid">${grid}</g>`;
   if (rightSeries.length) {
     const rightSpan = right.max - right.min || 1;
     for (let t = 0; t <= ticks; t += 1) {
@@ -153,11 +160,17 @@ export function lineChart(options: LineChartOptions): string {
   }
 
   let labels = "";
+  // At most five x labels; more than that collides at any realistic width.
   const xLabels = options.xLabels ?? [];
+  const every = Math.max(1, Math.ceil(xLabels.length / 5));
   if (xLabels.length) {
     xLabels.forEach((label, i) => {
+      const isLast = i === xLabels.length - 1;
+      if (!isLast && i % every !== 0) return;
+      // Never print a label that would collide with the final one.
+      if (!isLast && xLabels.length - 1 - i < every * 0.6) return;
       const xx = xLabels.length > 1 ? padL + (i * (w - padL - padR)) / (xLabels.length - 1) : padL;
-      labels += `<text class="chart-tick" x="${xx.toFixed(1)}" y="${h - 6}" text-anchor="${i === 0 ? "start" : i === xLabels.length - 1 ? "end" : "middle"}">${escapeXml(label)}</text>`;
+      labels += `<text class="chart-tick" x="${xx.toFixed(1)}" y="${h - 6}" text-anchor="${i === 0 ? "start" : isLast ? "end" : "middle"}">${escapeXml(label)}</text>`;
     });
   }
 
@@ -166,24 +179,26 @@ export function lineChart(options: LineChartOptions): string {
   series.forEach((s, idx) => {
     const minS = s.axis === "right" ? right.min : left.min;
     const maxS = s.axis === "right" ? right.max : left.max;
-    const d = linePath(s.values, w, h, minS, maxS, 0, 0)
-      .split(/(?=[ML])/)
-      .map((seg) => {
-        const [cmd, ...rest] = seg.split(" ");
-        const [px, py] = (rest[0] ?? "").split(" ");
-        const nx = ((Number(px) - 0) * (w - padL - padR)) / w + padL;
-        const ny = ((Number(py) - 0) * (h - padT - padB)) / h + padT;
-        return `${cmd}${nx.toFixed(2)} ${ny.toFixed(2)}`;
-      })
-      .join("");
+    // Map each datum straight into the padded plot box. Parsing the string
+    // that linePath produced was the source of a silent NaN regression.
+    const span = maxS - minS || 1;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const point = (value: number, i: number) => {
+      const px = padL + (s.values.length > 1 ? (i * plotW) / (s.values.length - 1) : 0);
+      const py = padT + (1 - (value - minS) / span) * plotH;
+      return `${i === 0 ? "M" : "L"}${px.toFixed(2)} ${py.toFixed(2)}`;
+    };
+    const d = s.values.map(point).join("");
     const cls = `chart-line chart-line-${idx}${s.cls ? ` ${s.cls}` : ""}`;
     const stroke = s.color ? `stroke="${s.color}"` : "";
-    const values = s.values.map((v) => fmtTick(v)).join(",");
+    // Tooltip values keep the unit of the series; ticks are abbreviated.
+    const values = s.values.map((v) => (Number.isFinite(v) ? String(Math.round(v * 100) / 100) : "—")).join(",");
     if (s.fill) {
-      const id = nextId();
       const first = x(0);
       const lastX = x(s.values.length - 1);
-      paths += `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${s.color ?? "currentColor"}" stop-opacity=".28"/><stop offset="100%" stop-color="${s.color ?? "currentColor"}" stop-opacity="0"/></linearGradient></defs><path class="chart-area" d="${d.replace(/^M[\d.]+ [\d.]+/, `M${first.toFixed(2)} ${(h - padB).toFixed(2)}`)}L${lastX.toFixed(2)} ${(h - padB).toFixed(2)}Z" fill="url(#${id})"/>`;
+      // The line path ends at the last datum; close it down to the baseline and back.
+      paths += `<path class="chart-area" d="${d}L${lastX.toFixed(2)} ${(h - padB).toFixed(2)}L${first.toFixed(2)} ${(h - padB).toFixed(2)}Z" ${s.color ? `fill="${s.color}"` : ""}/>`;
     }
     paths += `<path class="${cls}" d="${d}" ${stroke} data-values="${values}"/>`;
     const lastValue = s.values[s.values.length - 1];
@@ -193,17 +208,30 @@ export function lineChart(options: LineChartOptions): string {
     }
   });
 
+  // Axis label: the marker's own caption sits at its line, inside the plot.
+  const markerLabel = options.marker && options.marker.index >= 0 && options.marker.index < n
+    ? `<text class="chart-marker-label" x="${Math.min(w - padR - 4, x(options.marker.index) + 6).toFixed(1)}" y="${padT + 8}" text-anchor="${x(options.marker.index) > w - padR - 160 ? "end" : "start"}">${escapeXml(options.marker!.label)}</text>`
+    : "";
+
   const legend = options.showLegend === false
     ? ""
     : `<div class="chart-legend">${series
         .map((s, idx) => `<span class="legend-item"><i class="legend-swatch legend-${idx}"${s.color ? ` style="background:${s.color}"` : ""}></i>${escapeXml(s.name)}</span>`)
         .join("")}${options.legendExtra ? `<span class="legend-extra">${options.legendExtra}</span>` : ""}</div>`;
 
+  let marker = "";
+  if (options.marker && options.marker.index >= 0 && options.marker.index < n) {
+    const mx = x(options.marker.index).toFixed(1);
+    const tone = options.marker.tone === "err" ? "err" : options.marker.tone === "focus" ? "focus" : "warn";
+    marker = `<line class="chart-marker ${tone}" x1="${mx}" x2="${mx}" y1="${padT}" y2="${h - padB}" vector-effect="non-scaling-stroke"/>
+      <circle class="chart-marker-dot ${tone}" cx="${mx}" cy="${padT + 3}" r="2.4"/>`;
+  }
+
   return `<div class="chart" data-crosshair data-points="${n}" data-labels="${escapeXml(xLabels.join("|"))}">
-    <svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img">
+    <svg class="chart-svg" viewBox="0 0 ${w} ${h}" style="height:${svgHeight}px" role="img">
       ${grid}${labels}
-      <line class="chart-cross" x1="${padL}" x2="${padL}" y1="${padT}" y2="${h - padB}" visibility="hidden"/>
-      ${paths}${dots}
+      <line class="chart-cross" x1="${padL}" x2="${padL}" y1="${padT}" y2="${h - padB}" visibility="hidden" vector-effect="non-scaling-stroke"/>
+      ${paths}${marker}${markerLabel}${dots}
       <rect class="chart-hit" x="${padL}" y="${padT}" width="${w - padL - padR}" height="${h - padT - padB}" fill="transparent"/>
     </svg>
     <div class="chart-tip" hidden></div>
@@ -224,13 +252,6 @@ function fmtTick(v: number): string {
 
 function escapeXml(value: string): string {
   return value.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch] ?? ch);
-}
-
-/** ASCII bar for terminal theme (no SVG needed). */
-export function asciiBar(value: number, max: number, width = 16): string {
-  const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0;
-  const filled = Math.round(ratio * width);
-  return "█".repeat(filled) + "░".repeat(Math.max(0, width - filled));
 }
 
 /** Detaches the hover controller once after a render pass. */

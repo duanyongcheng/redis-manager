@@ -1,6 +1,7 @@
 import { bindCharts } from "./core/charts";
 import { api, errorMessage, redis } from "./core/api";
 import { esc, splitCommandLine } from "./core/format";
+import { icon } from "./core/icons";
 import {
   activeCliSession,
   addCliSession,
@@ -19,6 +20,7 @@ import {
   openKey,
   patch,
   refreshConnections,
+  currentHistory,
   removeConnection,
   runCli,
   saveConnection,
@@ -32,30 +34,30 @@ import {
   stopPolling,
   testConnection,
   toast,
+  type MetricSample,
   type PageId,
   type ViewState,
 } from "./core/store";
 import { settings } from "./theme/settings";
-import { isScheme, isThemeId, themeMeta, type Scheme, type ThemeId } from "./theme/themes";
+import { isScheme, type Scheme } from "./theme/themes";
 import { browserView } from "./views/browser";
 import { cliView } from "./views/cli";
 import { connectionsView, connectionDialog, editorDraft, type EditorDraft } from "./views/connections";
 import { monitorView } from "./views/monitor";
 import { overviewView, setWindowSize } from "./views/overview";
 import { settingsView } from "./views/settings";
-import { confirmModal, dataContext, palette, paletteList, sidebar, statusbar, tabs, toasts, topbar } from "./ui/shell";
+import { confirmModal, instanceHead, palette, paletteList, sidebar, statusbar, tabs, toasts, topbar } from "./ui/shell";
 
 interface LocalUi {
-  windowSize: number;
-  themeMenu: boolean;
-  testResult: { kind: "ok" | "err"; text: string } | null;
+  windowSize: string;
+  testResult: { kind: "ok" | "err" | "info"; text: string } | null;
   draft: EditorDraft | null;
   editor: ViewState["connectionEditor"];
   paletteQuery: string;
   paletteAction: string;
 }
 
-const ui: LocalUi = { windowSize: 60, themeMenu: false, testResult: null, draft: null, editor: null, paletteQuery: "", paletteAction: "" };
+const ui: LocalUi = { windowSize: "45", testResult: null, draft: null, editor: null, paletteQuery: "", paletteAction: "" };
 
 const root = document.getElementById("root")!;
 
@@ -73,100 +75,176 @@ const PAGE_VIEWS: Record<PageId, (s: ViewState) => string> = {
 };
 
 let scrollMemo: Record<string, number> = {};
-let hasPaintedApp = false;
-let renderedContext = "";
-let renderedKey: string | null = null;
-let renderedEditor: ViewState["connectionEditor"] = null;
-let renderedEditorMode: string | undefined;
+let firstPaint = true;
 let testRequest = 0;
-const pendingSelectUpdates = new WeakMap<HTMLSelectElement, HTMLSelectElement>();
+/** The session the live prompt's draft belongs to; re-pointed on each paint. */
+let draftSessionRef: { input?: string; id?: string } | null = null;
+/** The session the live prompt was painted for, so drafts never cross over. */
+/** The prompt node is about to be replaced by another session's prompt. */
+let sessionSwitchPending = false;
 const hashEditVersions = new WeakMap<HTMLFormElement, number>();
 
-function applySelectOptions(previous: HTMLSelectElement, next: HTMLSelectElement) {
-  const value = next.value;
-  previous.replaceChildren(...Array.from(next.childNodes));
-  previous.value = value;
-  previous.disabled = next.disabled;
-  pendingSelectUpdates.delete(previous);
+/**
+ * Re-renders the shell from an HTML string.
+ *
+ * The default is a wholesale replacement, which keeps the DOM exactly equal to
+ * the template. Only subtrees whose live identity matters survive a paint:
+ * an open dialog's form, an open document (iframe), a focused CLI prompt and
+ * the scroll position of the lists the user is reading. Five layers of patch
+ * selectors quietly diverging from the markup was the previous failure mode,
+ * so the patch list is deliberately short and structural.
+ */
+function updateRenderedApp(html: string, promptState: { focused: boolean; selection: { start: number | null; end: number | null; direction: "forward" | "backward" | "none" | null } | null } = { focused: false, selection: null }) {
+  const next = document.createElement("div");
+  next.innerHTML = html;
+
+  // Strip formatting whitespace between elements: those text nodes would
+  // otherwise become flex/grid items inside every layout container.
+  const stray = document.createNodeIterator(next, NodeFilter.SHOW_TEXT);
+  const blanks: Text[] = [];
+  for (let node = stray.nextNode(); node; node = stray.nextNode()) {
+    if (!(node as Text).data.trim()) blanks.push(node as Text);
+  }
+  for (const node of blanks) node.remove();
+
+  const promptFocus = promptState.focused;
+  const formText = readFormValues(root.querySelector("#connection-form"));
+  const keep = new Map<string, Element>();
+  // The connection form is rebuilt from its draft on purpose: its visible
+  // shape (mode-specific fields) must follow the state, and its values are
+  // restored below.
+  for (const selector of [".html-preview", "#cli-input", "#cli-log", ".value-body", ".key-list", ".stream-body", "#hash-form", ".filterbar"]) {
+    const live = root.querySelector(selector);
+    if (live) keep.set(selector, live);
+  }
+
+  // Any focused control the template can reproduce (by id) keeps its focus and
+  // caret: a rebuild must never move the user's cursor out of the field they
+  // are typing in. Selection is read before the paint removes it.
+  const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+  // A control without an id is named by the data attribute that identifies it.
+  const focusId = active && active !== document.body && active.id && active.id !== "cli-input"
+    ? active.id
+    : active?.dataset.setting
+      ? `[data-setting="${active.dataset.setting}"]`
+      : active?.hasAttribute("data-db-select")
+        ? "[data-db-select]"
+        // Form controls inside a repeated row are named by their section + name.
+        : "";
+  const focusSelection = focusId && typeof active?.selectionStart === "number"
+    ? { start: active.selectionStart, end: active.selectionEnd ?? active.selectionStart, direction: active.selectionDirection ?? "none" }
+    : null;
+
+  // Lists keep their node so the scroll offset survives the paint.
+  const listScroll = new Map<string, number>();
+  for (const [selector, live] of keep) {
+    if (live instanceof HTMLElement) listScroll.set(selector, live.scrollTop);
+  }
+
+  root.replaceChildren(...Array.from(next.childNodes));
+  firstPaint = false;
+
+  // A live document is only carried over when its own markup is unchanged:
+  // adopting a different document would show the previous value.
+  const liveFrame = keep.get(".html-preview");
+  const freshFrame = root.querySelector(".html-preview");
+  if (liveFrame && freshFrame) {
+    const same = (liveFrame as HTMLElement).outerHTML === (freshFrame as HTMLElement).outerHTML;
+    if (same) freshFrame.replaceWith(liveFrame);
+  }
+
+  // The command prompt is a live editing surface: keep the node (and with it
+  // the draft, caret, selection direction and focus) while metrics refresh.
+  // The hash form is a draft for one key: carry it only within the same key.
+  const liveHash = keep.get("#hash-form");
+  const freshHash = root.querySelector("#hash-form");
+  if (liveHash && freshHash && liveHash.getAttribute("data-key") === freshHash.getAttribute("data-key")) {
+    freshHash.replaceWith(liveHash);
+    const activeField = liveHash.querySelector<HTMLInputElement>(`[name="${active?.name}"]`);
+    if (active && liveHash.contains(active) && activeField) {
+      activeField.focus({ preventScroll: true });
+      if (focusSelection) {
+        try {
+          activeField.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+        } catch {
+          /* number inputs reject ranges */
+        }
+      }
+    }
+  }
+
+  // The SCAN pattern field is a draft: carry it while it holds the same text.
+  const liveFilters = keep.get(".filterbar");
+  const freshFilters = root.querySelector(".filterbar");
+  if (liveFilters && freshFilters) {
+    const livePattern = (liveFilters as HTMLElement).querySelector<HTMLInputElement>("#key-pattern");
+    const freshPattern = (freshFilters as HTMLElement).querySelector<HTMLInputElement>("#key-pattern");
+    if (livePattern && freshPattern && livePattern.value === freshPattern.value) {
+      freshFilters.replaceWith(liveFilters);
+      if (active && liveFilters.contains(active) && active instanceof HTMLInputElement) {
+        active.focus({ preventScroll: true });
+        if (focusSelection) active.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+      }
+    }
+  }
+
+  const livePrompt = keep.get("#cli-input");
+  const freshPrompt = root.querySelector("#cli-input");
+  if (livePrompt && freshPrompt) {
+    // The prompt is a per-session draft, not a value: carry it only while the
+    // session it belongs to is the one still on screen, then take back the
+    // focus the detach costs.
+    const sameSession = (livePrompt as HTMLInputElement).dataset.session === (freshPrompt as HTMLInputElement).dataset.session;
+    const sameValue = (livePrompt as HTMLInputElement).value === (freshPrompt as HTMLInputElement).value;
+
+    if (sameSession && sameValue) {
+      // The node is the caret and selection; the value is the draft. The
+      // fresh node is authoritative for everything else, the selection included.
+      freshPrompt.replaceWith(livePrompt);
+      if (promptFocus && livePrompt instanceof HTMLInputElement) {
+        const selection = promptState.selection;
+        livePrompt.focus({ preventScroll: true });
+        if (selection) livePrompt.setSelectionRange(selection.start ?? 0, selection.end ?? 0, selection.direction ?? "none");
+      }
+    }
+  }
+
+  for (const [selector, top] of listScroll) {
+    const fresh = root.querySelector<HTMLElement>(selector);
+    if (fresh) fresh.scrollTop = top;
+  }
+
+  // Restore what the user was doing: form contents, focus, caret.
+  const form = root.querySelector<HTMLFormElement>("#connection-form");
+  if (form && formText.size) {
+    for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-field]"))) {
+      const value = formText.get(el.dataset.field ?? "");
+      if (value != null && el.value !== value) el.value = value;
+    }
+  }
+  if (focusId) {
+    const el = (focusId.startsWith("[") ? root.querySelector(focusId) : document.getElementById(focusId)) as HTMLInputElement | HTMLTextAreaElement | null;
+    if (el && typeof el.focus === "function") {
+      el.focus({ preventScroll: true });
+      if (focusSelection && typeof el.setSelectionRange === "function") {
+        try {
+          el.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+        } catch {
+          /* number inputs and some controls reject ranges; focus is enough */
+        }
+      }
+    }
+  }
+  root.querySelector(".app")?.classList.remove("entering");
 }
 
-// Keep interactive subtrees connected when only the surrounding metrics change.
-// Replacing them would reset iframe documents or interrupt CLI input and focus.
-function updateRenderedApp(html: string, context: string) {
-  if (!hasPaintedApp) {
-    root.innerHTML = html;
-  } else {
-    const template = document.createElement("template");
-    template.innerHTML = html;
-    const updateRegion = (selector: string, replace = false) => {
-      const previous = root.querySelector(selector);
-      const next = template.content.querySelector(selector);
-      if (previous && next && (replace || !previous.isEqualNode(next))) previous.replaceWith(next);
-    };
-    const updateSelect = (selector: string) => {
-      const previous = root.querySelector<HTMLSelectElement>(selector);
-      const next = template.content.querySelector<HTMLSelectElement>(selector);
-      if (!previous || !next) return;
-      if (previous.isEqualNode(next)) {
-        pendingSelectUpdates.delete(previous);
-      } else if (document.activeElement === previous) {
-        // Updating native options can close an open picker even if the select stays connected.
-        pendingSelectUpdates.set(previous, next);
-      } else {
-        applySelectOptions(previous, next);
-      }
-    };
-    for (const selector of [".topbar", ".sidebar", ".tabs", ".statusbar"]) updateRegion(selector);
-    if (root.querySelector("[data-connection-select]") && template.content.querySelector("[data-connection-select]")) {
-      updateSelect("[data-connection-select]");
-      updateSelect("[data-db-select]");
-      updateRegion(".data-context-address");
-      updateRegion(".data-context-mode");
-    } else {
-      updateRegion(".data-context");
-    }
-    if (root.querySelector("#palette-input") && template.content.querySelector("#palette-input")) {
-      updateRegion("#palette-list");
-    } else {
-      updateRegion('[data-overlay="palette"]');
-    }
-    if (state.connectionEditor && state.connectionEditor === renderedEditor && root.querySelector("#connection-form") && template.content.querySelector("#connection-form")) {
-      if (ui.draft?.mode !== renderedEditorMode) updateRegion("#connection-mode-fields");
-      updateRegion("#connection-test-result");
-    } else {
-      updateRegion('[data-overlay="editor"]');
-    }
-    for (const name of ["theme", "confirm", "toasts"]) updateRegion(`[data-overlay="${name}"]`);
-    if (context === renderedContext && state.page === "browser" && root.querySelector(".browser") && template.content.querySelector(".browser")) {
-      for (const selector of [".browser-keys .card-meta", ".browser-chips", ".key-list", ".browser-foot"]) updateRegion(selector);
-      if (state.selectedKey === renderedKey && state.value?.key === state.selectedKey && root.querySelector("#hash-form") && template.content.querySelector("#hash-form")) {
-        updateRegion(".value-head");
-        updateRegion(".value-body > .tbl");
-        updateRegion(".value-foot");
-      } else {
-        updateRegion(".browser-value");
-      }
-    } else if (context === renderedContext && state.page === "cli" && root.querySelector(".cli") && template.content.querySelector(".cli")) {
-      updateRegion(".cli-bar");
-      updateRegion("#cli-log");
-      updateRegion(".cli-suggest");
-      updateRegion(".cli-prompt .prompt");
-    } else if (context === renderedContext && state.page === "settings" && root.querySelector(".settings") && template.content.querySelector(".settings")) {
-      updateRegion(".settings-theme");
-      updateRegion(".settings-about");
-      updateRegion('.settings [data-action="set-key-grouping"]');
-      updateRegion('.settings [data-action="set-cli-readonly"]');
-      for (const name of ["scanCount", "maxValueBytes", "cliHistoryLimit"]) updateSelect(`[data-setting="${name}"]`);
-    } else {
-      updateRegion(".content", true);
-    }
-    root.querySelector(".app")?.classList.remove("app-enter");
+function readFormValues(form: Element | null): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!form) return out;
+  for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-field]"))) {
+    out.set(el.dataset.field ?? "", el.value);
   }
-  renderedContext = context;
-  renderedKey = state.selectedKey;
-  renderedEditor = state.connectionEditor;
-  renderedEditorMode = ui.draft?.mode;
-  hasPaintedApp = true;
+  return out;
 }
 
 function pageBody(s: ViewState): string {
@@ -181,6 +259,9 @@ function pageBody(s: ViewState): string {
 function render() {
   const s = state;
   const conn = currentConnection();
+  // While the connection form is open it owns the draft; the live fields are
+  // read straight back into it, so no action can overwrite what was typed.
+  if (s.connectionEditor) readDraft();
   syncEditorDraft();
   const hadPalette = Boolean(root.querySelector("#palette-input"));
   // Preserve the scroll offset of the page container across re-renders.
@@ -192,29 +273,31 @@ function render() {
   if (prevValue) scrollMemo["value"] = prevValue.scrollTop;
   const prevKeys = root.querySelector<HTMLElement>(".key-list");
   if (prevKeys) scrollMemo["keys"] = prevKeys.scrollTop;
+  const prevWindowY = window.scrollY;
+  const prevPrompt = root.querySelector<HTMLInputElement>("#cli-input");
+
+  const prevPromptFocused = document.activeElement === prevPrompt;
+  const prevPromptSelection = prevPrompt ? { start: prevPrompt.selectionStart, end: prevPrompt.selectionEnd, direction: prevPrompt.selectionDirection } : null;
+  // The prompt is the source of truth for its draft at paint time; mirroring it
+  // into the session it belonged to keeps every rebuild faithful.
+  if (prevPrompt && !sessionSwitchPending) saveDraft();
+  sessionSwitchPending = false;
+  draftSessionRef = activeCliSession();
 
   const html = `
-    <div class="app${hasPaintedApp ? "" : " app-enter"}">
+    <div class="app${firstPaint ? " entering" : ""}">
       ${topbar(s)}
-      <div class="workarea">
-        ${sidebar(s)}
-        <main class="main">
-          ${tabs(s)}
-          ${dataContext(s)}
-          <div class="content" data-page="${s.page}">${s.serviceAvailable ? "" : serviceBanner()}${pageBody(s)}</div>
-        </main>
-      </div>
+      <div class="workspace">${sidebar(s)}<main class="main">${instanceHead(s)}${tabs(s)}${s.page === "connections" || s.page === "settings" ? pageHead(s) : ""}<div class="content" data-page="${s.page}">${serviceBanner()}${pageBody(s)}</div></main></div>
       ${statusbar(s)}
     </div>
     <div class="app-overlays">
       <div data-overlay="palette">${palette(s, ui.paletteQuery, ui.paletteAction)}</div>
       <div data-overlay="editor">${s.connectionEditor ? connectionDialog(s, ui.draft!, ui.testResult) : ""}</div>
-      <div data-overlay="theme">${ui.themeMenu ? themeMenu(s) : ""}</div>
       <div data-overlay="confirm">${confirmModal(s)}</div>
       <div data-overlay="toasts">${toasts(s)}</div>
     </div>`;
 
-  updateRenderedApp(html, JSON.stringify([s.page, conn?.id, currentDb(conn), s.page === "cli" ? activeCliSession()?.id : null]));
+  updateRenderedApp(html, { focused: prevPromptFocused, selection: prevPromptSelection });
   document.title = conn ? `Redis Manager — ${conn.name || conn.host}` : "Redis Manager";
 
   // restore scrolls
@@ -227,37 +310,36 @@ function render() {
   if (valueBody && scrollMemo["value"]) valueBody.scrollTop = scrollMemo["value"]!;
   const keyList = root.querySelector<HTMLElement>(".key-list");
   if (keyList && scrollMemo["keys"]) keyList.scrollTop = scrollMemo["keys"]!;
+  // Values can be long enough to scroll the host page; keep the reader's place.
+  if (prevWindowY > 0 && window.scrollY !== prevWindowY) window.scrollTo(0, prevWindowY);
 
   bindCharts(root);
   if (s.paletteOpen && !hadPalette) focusPalette();
-  updateAsciiBars();
   updateThemeMeta();
   document.documentElement.dataset.page = s.page;
 }
 
-function serviceBanner(): string {
-  return `<div class="notice warn" style="margin-bottom:var(--gap)">未检测到 Go 服务：<code class="mono">bun run dev:web</code> 只能预览界面，完整的绑定需要 <code class="mono">bun run dev</code>（MyGo 窗口）。</div>`;
+/** Head for the two global pages, which are not views of an instance. */
+function pageHead(s: ViewState): string {
+  const conn = currentConnection();
+  if (s.page === "connections") {
+    return `<div class="page-head"><h1>连接管理</h1><span class="sub">${s.connections.length} 个实例 · 按分组排列在左侧</span><span class="spacer"></span><button class="btn" data-action="refresh">${icon("refresh", 12)} 刷新</button><button class="btn primary" data-action="new-connection">${icon("plus", 12)} 新建连接</button></div>`;
+  }
+  return `<div class="page-head"><h1>设置</h1><span class="sub">配色 · 浏览 · 命令行 · 凭据</span></div>`;
 }
 
-/** ASCII themes paint bars as text; CSS can't compute widths, JS can. */
-function updateAsciiBars() {
-  if (settings.get("theme") !== "terminal") return;
-  root.querySelectorAll<HTMLElement>(".bar-track > i").forEach((fill) => {
-    const parent = fill.parentElement;
-    if (!parent) return;
-    const width = Number.parseFloat(fill.style.width || "0");
-    const slots = 18;
-    const filled = Math.max(1, Math.round((width / 100) * slots));
-    parent.style.setProperty("--ascii", `'${"█".repeat(filled)}${"░".repeat(slots - filled)}'`);
-  });
-  root.querySelectorAll<HTMLElement>(".bar").forEach((bar) => {
-    const fill = bar.querySelector<HTMLElement>("i");
-    if (!fill) return;
-    const width = Number.parseFloat(fill.style.width || "0");
-    const slots = 24;
-    const filled = Math.round((width / 100) * slots);
-    bar.style.setProperty("--ascii", `'[${"█".repeat(filled)}${"░".repeat(slots - filled)}]'`);
-  });
+/** Selecting a sample in the stream pins the detail pane and the histogram. */
+function selectSample(index: number) {
+  const hist = currentHistory();
+  const sample = hist[index];
+  if (!sample) return;
+  patch({ selectedSampleAt: sample.at });
+}
+
+/** Preview mode is a caption under the tabs, not a notice competing with data. */
+function serviceBanner(): string {
+  if (state.serviceAvailable) return "";
+  return `<div class="preview-note" title="连接真实 Redis 请用 bun run dev 打开桌面窗口">${icon("info", 11)}<span>预览数据 · 未连接 Go 服务</span><span class="mono">?preview=1</span></div>`;
 }
 
 function updateThemeMeta() {
@@ -266,42 +348,6 @@ function updateThemeMeta() {
     const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
     if (bg) meta.setAttribute("content", bg);
   }
-}
-
-/* ------------------------------------------------------------------ */
-/* Theme menu (topbar dropdown)                                        */
-/* ------------------------------------------------------------------ */
-
-function themeMenu(s: ViewState): string {
-  const active = settings.get("theme");
-  const scheme = settings.get("scheme");
-  return `<div class="scrim theme-scrim" data-action="theme-menu-close">
-    <div class="palette theme-menu" data-stop>
-      <div class="palette-group">界面主题</div>
-      ${themeMeta(active) && ""
-      }
-      ${["terminal", "craft", "console", "airy"]
-        .map((id) => {
-          const meta = themeMeta(id as ThemeId);
-          return `<button class="palette-item ${active === id ? "active" : ""}" data-pick-theme="${id}">
-            <span class="theme-swatch" style="background:${meta.swatch[0]};border-color:${meta.swatch[1]}"></span>
-            <span>${esc(meta.name)} <span class="faint">${esc(meta.tagline)}</span></span>
-            <span class="p-hint">${meta.schemes ? `${meta.schemes.length} 配色` : "单配色"}</span>
-            ${active === id ? `<span class="acc">✓</span>` : ""}
-          </button>`;
-        })
-        .join("")}
-      ${themeMeta(active).schemes
-        ? `<div class="palette-group">深浅色</div><div class="row" style="padding:4px 10px 10px">
-            ${themeMeta(active)
-              .schemes!.map((sc) => `<button class="chip ${scheme === sc ? "active" : ""}" data-pick-scheme="${sc}">${sc === "dark" ? "深色" : "浅色"}</button>`)
-              .join("")}
-          </div>`
-        : ""}
-      <div class="palette-group" style="border-top:1px solid var(--line);margin-top:4px">更多</div>
-      <button class="palette-item" data-nav="settings">在设置中管理主题 <span class="p-hint">⌘,</span></button>
-    </div>
-  </div>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -349,7 +395,7 @@ async function onTestConnection() {
     render();
     return;
   }
-  ui.testResult = { kind: "err", text: "正在连接…" };
+  ui.testResult = { kind: "info", text: "正在连接…" };
   render();
   try {
     const result = await redis.testConnection(conn as never, draft.password ?? "");
@@ -430,20 +476,9 @@ const actions: Record<string, () => void | Promise<void>> = {
   "save-connection": () => onSaveConnection(),
   "palette": () => openPalette(),
   "palette-close": () => closePalette(),
-  "theme-menu": () => {
-    ui.themeMenu = true;
-    render();
-  },
-  "theme-menu-close": () => {
-    ui.themeMenu = false;
-    render();
-  },
-  "toggle-sidebar": () => settings.patch({ sidebarCollapsed: !settings.get("sidebarCollapsed") }),
   "toggle-scheme": () => {
-    const meta = themeMeta(settings.get("theme"));
-    if (!meta.schemes) return;
     const next: Scheme = settings.get("scheme") === "dark" ? "light" : "dark";
-    settings.patch({ scheme: meta.schemes.includes(next) ? next : meta.defaultScheme });
+    settings.patch({ scheme: next });
   },
   "toggle-grouping": () => settings.patch({ keyGrouping: !settings.get("keyGrouping") }),
   "go-cli": () => go("cli"),
@@ -518,21 +553,11 @@ function closest<T extends Element = HTMLElement>(target: EventTarget | null, se
 document.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
 
-  // theme pickers (menu + settings)
-  const themeBtn = closest<HTMLElement>(target, "[data-pick-theme]");
-  if (themeBtn) {
-    settings.patch({ theme: themeBtn.dataset.pickTheme as ThemeId });
-    ui.themeMenu = false;
-    render();
-    return;
-  }
+  // scheme pickers (menu + settings)
   const schemeBtn = closest<HTMLElement>(target, "[data-pick-scheme]");
   if (schemeBtn) {
-    const meta = themeMeta(settings.get("theme"));
     const scheme = schemeBtn.dataset.pickScheme as Scheme;
-    if (!meta.schemes || meta.schemes.includes(scheme)) settings.patch({ scheme });
-    ui.themeMenu = false;
-    render();
+    if (isScheme(scheme)) settings.patch({ scheme });
     return;
   }
 
@@ -594,18 +619,26 @@ document.addEventListener("click", (event) => {
     if (["raw", "json", "hex", "html", "markdown"].includes(mode)) patch({ valueMode: mode });
     return;
   }
-  const windowBtn = closest<HTMLElement>(target, "[data-window]");
-  if (windowBtn?.dataset.window) {
-    ui.windowSize = Number(windowBtn.dataset.window) || 60;
+  const windowBtn = closest<HTMLElement>(target, "[data-seg-action]");
+  if (windowBtn?.dataset.segAction === "window" && windowBtn.dataset.segValue) {
+    ui.windowSize = windowBtn.dataset.segValue;
     setWindowSize(state, ui.windowSize);
     render();
     return;
   }
-  const cliSession = closest<HTMLElement>(target, "[data-cli-session]");
-  if (cliSession?.dataset.cliSession != null) {
+  const sampleRow = closest<HTMLElement>(target, "[data-sample]");
+  if (sampleRow?.dataset.sample != null) {
+    selectSample(Number(sampleRow.dataset.sample));
+    return;
+  }
+  const cliSession = closest<HTMLElement>(target, "[data-session-tab]");
+  if (cliSession?.dataset.sessionTab != null) {
+    sessionSwitchPending = true;
     const conn = currentConnection();
     if (conn) {
-      state.cliActive[conn.id] = Number(cliSession.dataset.cliSession);
+      // Switching views another session; the painter mirrors the outgoing
+      // prompt into the outgoing session before the new one is drawn.
+      state.cliActive[conn.id] = Number(cliSession.dataset.sessionTab);
       notify();
     }
     return;
@@ -615,12 +648,31 @@ document.addEventListener("click", (event) => {
     setCliReadOnly(cliMode.dataset.cliMode === "readonly");
     return;
   }
+  if (closest(target, "[data-cli-new]")) {
+    // Record the outgoing session's draft first, then open an empty one.
+    saveDraft();
+    addCliSession();
+    return;
+  }
+  const swatch = closest<HTMLElement>(target, "[data-color-pick]");
+  if (swatch) {
+    // The picker writes into the draft and repaints only the picker: the rest
+    // of the dialog keeps its values through readDraft().
+    readDraft();
+    if (ui.draft) ui.draft.color = swatch.dataset.colorPick || undefined;
+    render();
+    return;
+  }
+
   const fill = closest<HTMLElement>(target, "[data-fill]");
   if (fill?.dataset.fill) {
     const input = document.getElementById("cli-input") as HTMLInputElement | null;
     if (input) {
       input.value = fill.dataset.fill;
       input.focus();
+      // A filled suggestion is a draft like any other: it must survive the
+      // next paint, which renders the prompt from the session.
+      saveDraft();
     }
     return;
   }
@@ -671,7 +723,7 @@ document.addEventListener("click", (event) => {
     }
     // scrim click handlers (palette / theme menu / dialogs) close when the
     // click lands outside the inner panel.
-    if (action === "palette-close" || action === "theme-menu-close" || action === "editor-close" || action === "confirm-cancel") {
+    if (action === "palette-close" || action === "editor-close" || action === "confirm-cancel") {
       return;
     }
   }
@@ -680,10 +732,7 @@ document.addEventListener("click", (event) => {
   const scrim = target.classList?.contains("scrim") ? target : target.classList?.contains("dialog-scrim") ? target : null;
   if (scrim) {
     if (state.paletteOpen) closePalette();
-    else if (ui.themeMenu) {
-      ui.themeMenu = false;
-      render();
-    } else if (state.confirm) patch({ confirm: null });
+ else if (state.confirm) patch({ confirm: null });
     else if (state.connectionEditor) {
       ui.draft = null;
       ui.testResult = null;
@@ -709,6 +758,13 @@ document.addEventListener("input", (event) => {
     if (list) list.innerHTML = paletteList(state, target.value);
     return;
   }
+  if (target.id === "cli-input") {
+    // The draft lives in the session so a rebuild (polling, dialogs, scheme)
+    // renders the same draft back instead of an empty prompt.
+    const session = activeCliSession();
+    if (session) session.input = target.value;
+    return;
+  }
   if (target.id === "key-pattern") {
     state.keyPattern = target.value;
     return;
@@ -729,6 +785,7 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
+
   if (target.matches("#connection-form [data-field]")) {
     readDraft();
     if (target.dataset.field === "mode") render();
@@ -747,13 +804,6 @@ document.addEventListener("change", (event) => {
   if (key === "scanCount" || key === "cliHistoryLimit" || key === "maxValueBytes") {
     settings.patch({ [key]: Number(target.value) } as never);
   }
-});
-
-document.addEventListener("focusout", (event) => {
-  const target = event.target;
-  if (!(target instanceof HTMLSelectElement)) return;
-  const pending = pendingSelectUpdates.get(target);
-  if (pending && target.isConnected) applySelectOptions(target, pending);
 });
 
 document.addEventListener("submit", (event) => {
@@ -788,6 +838,8 @@ document.addEventListener("submit", (event) => {
   }
 });
 
+
+
 document.addEventListener("keydown", (event) => {
   const mod = event.metaKey || event.ctrlKey;
   // Keyboard events may target the document (programmatic dispatch, some
@@ -797,10 +849,6 @@ document.addEventListener("keydown", (event) => {
 
   if (event.key === "Escape") {
     if (state.paletteOpen) return void closePalette();
-    if (ui.themeMenu) {
-      ui.themeMenu = false;
-      return void render();
-    }
     if (state.confirm) return void patch({ confirm: null });
     if (state.connectionEditor) return void actions["editor-close"]!();
     return;
@@ -883,23 +931,30 @@ document.addEventListener("keydown", (event) => {
     }
     if (event.key === "ArrowUp" && session) {
       event.preventDefault();
-      const input = target as HTMLInputElement;
-      const idx = Number(input.dataset.hist ?? session.history.length);
-      const next = Math.max(0, idx - 1);
-      input.dataset.hist = String(next);
-      input.value = session.history[next] ?? "";
+      recall(target as HTMLInputElement, session, -1);
       return;
     }
     if (event.key === "ArrowDown" && session) {
       event.preventDefault();
-      const input = target as HTMLInputElement;
-      const idx = Number(input.dataset.hist ?? session.history.length);
-      const next = Math.min(session.history.length, idx + 1);
-      input.dataset.hist = String(next);
-      input.value = session.history[next] ?? "";
+      recall(target as HTMLInputElement, session, 1);
       return;
     }
     if (event.key !== "Enter") delete (target as HTMLInputElement).dataset.hist;
+  }
+
+  // Lists are keyboard-navigable: ↑/↓ roves the selection in the key list and
+  // the sample stream, so a 45-row stream never costs 45 tab stops.
+  const roving = target?.closest<HTMLElement>(".key-row") ? ".key-row" : target?.closest<HTMLElement>(".srow") ? ".srow" : null;
+  if (roving && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    event.preventDefault();
+    const rows = Array.from(root.querySelectorAll<HTMLElement>(roving));
+    const index = rows.indexOf(target as HTMLElement);
+    const next = rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))];
+    if (next) {
+      next.focus({ preventScroll: false });
+      next.click();
+    }
+    return;
   }
 
   if (event.key === "Enter" && target?.id === "key-pattern") {
@@ -907,6 +962,24 @@ document.addEventListener("keydown", (event) => {
     void scanKeys({ reset: true });
   }
   if (typing) return;
+});
+
+/**
+ * Arrow keys drive the focused list row without re-binding a handler: the
+ * click that follows already routes through the normal selection path.
+ */
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const row = (event.target as HTMLElement | null)?.closest?.(".key-row, .srow") as HTMLElement | null;
+  if (!row) return;
+  event.preventDefault();
+  const selector = row.classList.contains("key-row") ? ".key-row" : ".srow";
+  const rows = Array.from(root.querySelectorAll<HTMLElement>(selector));
+  const next = rows[Math.max(0, Math.min(rows.length - 1, rows.indexOf(row) + (event.key === "ArrowDown" ? 1 : -1)))];
+  if (next) {
+    next.focus({ preventScroll: false });
+    next.click();
+  }
 });
 
 const COMMANDS = [
@@ -917,12 +990,37 @@ const COMMANDS = [
   "TYPE", "UNLINK", "XADD", "XLEN", "XRANGE", "ZADD", "ZCARD", "ZRANGE", "ZREM",
 ];
 
+/**
+ * History navigation owns the draft while it is active: the recalled command
+ * becomes the session's draft (so a repaint keeps it) and the cursor position
+ * in the history travels with it.
+ */
+/**
+ * The prompt is the live editing surface and owns its draft: every place that
+ * can replace or lose the node calls this first, writing into the session the
+ * node currently belongs to (resolved by id, never by "whatever is active").
+ */
+function saveDraft() {
+  const input = root.querySelector<HTMLInputElement>("#cli-input");
+  if (!input) return;
+  const owner = Object.values(state.cliSessions).flat().find((item) => item.id === input.dataset.session);
+  if (owner) owner.input = input.value;
+}
+
+function recall(input: HTMLInputElement, session: { history: string[]; input?: string }, step: -1 | 1) {
+  const index = Number(input.dataset.hist ?? session.history.length);
+  const next = step === -1 ? Math.max(0, index - 1) : Math.min(session.history.length, index + 1);
+  input.dataset.hist = String(next);
+  input.value = session.history[next] ?? "";
+  session.input = input.value;
+}
+
 /* ------------------------------------------------------------------ */
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 
 settings.subscribe((_, changed) => {
-  if (changed.has("theme") || changed.has("scheme")) render();
+  if (changed.has("scheme")) render();
   else notify();
 });
 
@@ -937,17 +1035,20 @@ async function boot() {
   window.__RM_DEBUG__ = { outside: window.__RM_OUTSIDE__, available: api.available, hasWindowSvc: Boolean(window.RedisService) };
   void loadAppInfo();
   await refreshConnections();
+  // The screenshot fixture seeds a short history so charts read like a session
+  // that has been open for a while; the real app never sets this.
+  const seed = (window as unknown as { __RM_PREVIEW_SEED__?: MetricSample[] }).__RM_PREVIEW_SEED__;
+  if (Array.isArray(seed) && seed.length && !(window as unknown as { __RM_SEEDED__?: boolean }).__RM_SEEDED__) {
+    (window as unknown as { __RM_SEEDED__?: boolean }).__RM_SEEDED__ = true;
+    // Keyed by the selected instance: loadOverview replaces its own entry.
+    if (state.connId) state.history[state.connId] = seed;
+    notify();
+  }
   const params = new URLSearchParams(location.search);
   setWindowSize(state, ui.windowSize);
   // Preview deep links (used by scripts/shoot-all.mjs) may force a theme.
-  const themeParam = params.get("theme");
   const schemeParam = params.get("scheme");
-  if (isThemeId(themeParam)) {
-    const meta = themeMeta(themeParam);
-    settings.patch({ theme: themeParam, scheme: isScheme(schemeParam) ? schemeParam : meta.defaultScheme });
-  } else if (isScheme(schemeParam)) {
-    settings.patch({ scheme: schemeParam });
-  }
+  if (isScheme(schemeParam)) settings.patch({ scheme: schemeParam });
   const page = params.get("page") as PageId | null;
   if (page && PAGE_VIEWS[page]) go(page);
   if (state.serviceAvailable) {

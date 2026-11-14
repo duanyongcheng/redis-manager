@@ -6,7 +6,7 @@ const updatePublicKey = process.env.MYGO_UPDATER_PUBLIC_KEY?.trim();
 export default defineConfig({
   name: "redis-manager",
   identifier: "top.fcodex.redismanager",
-  version: "0.1.1",
+  version: "0.2.0",
   devUrl: "http://localhost:5173",
   devCommand: "bun run dev:web",
   buildCommand: "bun run build:web",

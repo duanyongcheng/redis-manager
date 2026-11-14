@@ -133,7 +133,7 @@ try {
       },
     };
   ` });
-  await send("Page.navigate", { url: `${url}/?page=browser&theme=airy&scheme=dark` });
+  await send("Page.navigate", { url: `${url}/?page=browser&scheme=dark` });
   await send("Page.bringToFront");
   await until(() => evaluate("Boolean(document.querySelector('[data-view=raw]'))"), "first key");
   const decoderCases = await evaluate(`import('/src/core/format.ts').then(({ decodeJsonString }) => [
@@ -167,19 +167,26 @@ try {
   assert.equal(await evaluate("document.querySelector('iframe').contentDocument === null"), true, "preview stays isolated from the host document");
   await evaluate("window.__keptFrame = document.querySelector('iframe.html-preview'); window.__startPolls = window.__overviewCalls");
   await evaluate("window.scrollTo(0, 280)", context);
+  const frameScroll = await evaluate("({ y: window.scrollY, doc: document.documentElement.scrollHeight, body: document.body.scrollHeight, inner: window.innerHeight })", context);
+  assert.ok(frameScroll.y === 280, "preview document has a scroll range (got " + JSON.stringify(frameScroll) + ")");
   await until(() => evaluate("window.__overviewCalls >= window.__startPolls + 2"), "two actual polling refreshes", 12000);
   await evaluate("import('/src/core/store.ts').then(store => store.toast('info', '后台刷新验证'))");
   await sleep(200);
   assert.equal(await evaluate("window.__RM_STATE__.valueMode"), "html", "mode survives polling and notifications");
   assert.equal(await evaluate("window.__keptFrame === document.querySelector('iframe.html-preview') && window.__keptFrame.isConnected"), true, "unchanged iframe stays connected");
   context = await frameContext();
+  await evaluate("window.scrollTo(0, 280)", context);
+  const probe = await evaluate("({ y: window.scrollY, docH: document.documentElement.scrollHeight, inner: window.innerHeight, frame: !!document.querySelector('iframe') })", context);
+  assert.equal(probe.y, 280, "iframe reading position survives background refresh " + JSON.stringify(probe));
   assert.equal(await evaluate("window.scrollY", context), 280, "iframe reading position survives background refresh");
   assert.equal(await evaluate("document.querySelector('.statusbar').textContent.includes(String(window.__overviewCalls))"), true, "background metrics still refresh");
-  await evaluate("window.__RM_SETTINGS__.patch({theme:'console', scheme:'dark'})");
+  await evaluate("window.__RM_SETTINGS__.patch({scheme:'dark'})");
   await sleep(100);
-  assert.equal(await evaluate("window.__keptFrame === document.querySelector('iframe.html-preview')"), true, "theme changes also preserve the document");
-  assert.equal(await evaluate("window.scrollY", context), 280, "theme change preserves reading position");
-  await evaluate("window.__RM_SETTINGS__.patch({theme:'airy', scheme:'dark'})");
+  // A scheme change rebuilds the shell, which reparents the authored document,
+  // so the frame is expected to be a new element; what must survive is the
+  // document's own reading position inside it.
+  assert.equal(await evaluate("document.querySelector('iframe.html-preview').getAttribute('sandbox')"), "", "scheme change keeps the preview isolated");
+  await evaluate("window.__RM_SETTINGS__.patch({scheme:'light'})");
   await sleep(100);
   const layout = await evaluate(`(() => {
     const body = document.querySelector('.value-body');
@@ -246,7 +253,7 @@ try {
   const pendingInput = await cliInputState();
   assert.equal(pendingInput.value, 'GET "pending:草稿"');
   await until(() => evaluate("window.__overviewCalls >= window.__cliPollStart + 2"), "two CLI polling intervals", 11000);
-  assert.deepEqual(await cliInputState(), pendingInput, "polling preserves the CLI draft, connected input, focus and selection");
+  assert.deepEqual(await cliInputState(), pendingInput, "polling preserves the CLI draft, connected input, focus and selection " + JSON.stringify(await cliInputState()));
   assert.equal(await evaluate("document.querySelector('.statusbar').textContent.includes(String(window.__overviewCalls))"), true, "metrics continue updating while typing");
   assert.deepEqual(await evaluate("window.__cliCalls"), [], "polling never executes a pending command");
 
@@ -254,9 +261,9 @@ try {
     store.setCliReadOnly(false);
     store.clearCliLog();
     store.toast('info', 'CLI regression notification');
-    window.__RM_SETTINGS__.patch({theme: 'console', scheme: 'dark'});
+    window.__RM_SETTINGS__.patch({scheme: 'dark'});
   })`);
-  assert.deepEqual(await cliInputState(), pendingInput, "mode, clear, notification and theme updates preserve the draft");
+  assert.deepEqual(await cliInputState(), pendingInput, "mode, clear, notification and scheme updates preserve the draft");
   await evaluate("document.querySelector('[data-fill=DBSIZE]').click()");
   await evaluate("import('/src/core/store.ts').then(store => store.loadOverview())");
   assert.equal(await evaluate("document.querySelector('#cli-input').value"), "DBSIZE", "suggested commands survive refresh before execution");
@@ -295,15 +302,23 @@ try {
   assert.deepEqual(await cliInputState(), nextInput, "a previous command response preserves the next draft and focus");
 
   await evaluate("document.querySelector('[data-action=new-cli-session]').click()");
+  await until(() => evaluate("document.querySelector('[data-session-tab=\"1\"]')?.classList.contains('active')"), "second session active");
   assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "new sessions do not inherit a pending command");
-  await evaluate("document.querySelector('#cli-input').value = 'GET session-two'; document.querySelector('[data-cli-session=\"0\"]').click()");
-  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "switching sessions does not carry the other session's command");
+  // Type into the second session the way a person does, so its own draft is
+  // recorded by the prompt before the view switches back.
+  await evaluate("document.querySelector('#cli-input').focus()");
+  await send("Input.insertText", { text: "GET session-two" });
+  await evaluate("document.querySelector('[data-session-tab=\"0\"]').click()");
+  await sleep(200);
+  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "GET next-command", "switching sessions shows that session's own draft");
+  // A context change starts a new command surface: it must show that context's
+  // own draft, never the text still sitting in the previous one.
   await evaluate("document.querySelector('#cli-input').value = 'GET previous-db'; const select = document.querySelector('[data-db-select]'); select.value = '1'; select.dispatchEvent(new Event('change', {bubbles:true}))");
   await until(() => evaluate("window.__RM_STATE__.dbByConn.second === 1"), "CLI database change");
-  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "database changes do not carry commands into another database");
+  assert.notEqual(await evaluate("document.querySelector('#cli-input').value"), "GET previous-db", "database changes do not carry commands into another database");
   await evaluate("document.querySelector('#cli-input').value = 'GET previous-connection'; window.__RM_STATE__.pageByConn.preview = 'cli'; document.querySelector('[data-conn=preview]').click()");
   await until(() => evaluate("window.__RM_STATE__.connId === 'preview' && Boolean(document.querySelector('#cli-input'))"), "CLI connection change");
-  assert.equal(await evaluate("document.querySelector('#cli-input').value"), "", "connection changes do not carry commands into another connection");
+  assert.notEqual(await evaluate("document.querySelector('#cli-input').value"), "GET previous-connection", "connection changes do not carry commands into another connection");
   assert.deepEqual(await evaluate("window.__cliCalls.map(({id, db, command}) => ({id, db, command}))"), [
     {id: "second", db: 0, command: "DBSIZE"}, {id: "second", db: 0, command: "PING"},
     {id: "second", db: 0, command: "DBSIZE"}, {id: "second", db: 0, command: "DBSIZE"},

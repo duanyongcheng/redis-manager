@@ -1,9 +1,7 @@
-import { DEFAULT_THEME, isScheme, isThemeId, themeMeta, type Scheme, type ThemeId } from "./themes";
+import { DEFAULT_SCHEME, isScheme, type Scheme } from "./themes";
 
 export interface Settings {
-  theme: ThemeId;
   scheme: Scheme;
-  sidebarCollapsed: boolean;
   keyGrouping: boolean;
   scanCount: number;
   maxValueBytes: number;
@@ -13,12 +11,12 @@ export interface Settings {
   language: "zh" | "en";
 }
 
-const STORAGE_KEY = "redis-manager.settings.v2";
+const STORAGE_KEY = "redis-manager.settings.v3";
+/** Pre-v3 records carried a `theme` field; only their scheme survives the redesign. */
+const LEGACY_KEY = "redis-manager.settings.v2";
 
 export const DEFAULT_SETTINGS: Settings = {
-  theme: DEFAULT_THEME,
-  scheme: themeMeta(DEFAULT_THEME).defaultScheme,
-  sidebarCollapsed: false,
+  scheme: DEFAULT_SCHEME,
   keyGrouping: true,
   scanCount: 200,
   maxValueBytes: 2 * 1024 * 1024,
@@ -64,19 +62,6 @@ class SettingsStore {
     }
     if (changed.size === 0) return;
 
-    // A scheme that the newly picked theme does not support falls back to the
-    // theme's own default, so switching themes never yields an unstyled state.
-    if (changed.has("theme") && isThemeId(next.theme)) {
-      const meta = themeMeta(next.theme);
-      if (!meta.schemes) {
-        next.scheme = meta.defaultScheme;
-        changed.add("scheme");
-      } else if (!meta.schemes.includes(next.scheme)) {
-        next.scheme = meta.defaultScheme;
-        changed.add("scheme");
-      }
-    }
-
     this.current = next;
     this.save();
     this.applyTheme();
@@ -91,31 +76,21 @@ class SettingsStore {
     for (const listener of this.listeners) listener(this.current, all);
   }
 
-  /** Reflects theme + scheme on the document so CSS can do the rest. */
+  /** Reflects the scheme on the document so CSS can do the rest. */
   applyTheme() {
     const root = document.documentElement;
-    root.dataset.theme = this.current.theme;
     root.dataset.scheme = this.current.scheme;
-    root.dataset.sidebar = this.current.sidebarCollapsed ? "collapsed" : "expanded";
   }
 
   private load(): Settings {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return { ...DEFAULT_SETTINGS };
-      const parsed = JSON.parse(raw) as Partial<Settings>;
-      const theme = isThemeId(parsed.theme) ? parsed.theme : DEFAULT_SETTINGS.theme;
-      const meta = themeMeta(theme);
-      const scheme = isScheme(parsed.scheme) && (!meta.schemes || meta.schemes.includes(parsed.scheme)) ? parsed.scheme : meta.defaultScheme;
-      return {
-        ...DEFAULT_SETTINGS,
-        ...parsed,
-        theme,
-        scheme,
-        scanCount: clamp(Number(parsed.scanCount) || DEFAULT_SETTINGS.scanCount, 10, 1000),
-        maxValueBytes: clamp(Number(parsed.maxValueBytes) || DEFAULT_SETTINGS.maxValueBytes, 64 * 1024, 64 * 1024 * 1024),
-        cliHistoryLimit: clamp(Number(parsed.cliHistoryLimit) || DEFAULT_SETTINGS.cliHistoryLimit, 50, 5000),
-      };
+      const stored = readObject(STORAGE_KEY);
+      if (stored) return normalize(stored);
+      const legacy = readObject(LEGACY_KEY);
+      // A returning user keeps the scheme they chose; the old four-theme look
+      // is gone, so its `theme` field has no successor to map onto.
+      if (legacy) return normalize({ ...legacy, scheme: legacy.scheme });
+      return { ...DEFAULT_SETTINGS };
     } catch {
       return { ...DEFAULT_SETTINGS };
     }
@@ -128,6 +103,24 @@ class SettingsStore {
       /* localStorage can be unavailable in hardened webviews — settings then live for the session. */
     }
   }
+}
+
+function readObject(key: string): Record<string, unknown> | null {
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
+  const parsed = JSON.parse(raw) as unknown;
+  return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+}
+
+function normalize(parsed: Record<string, unknown>): Settings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(parsed as Partial<Settings>),
+    scheme: isScheme(parsed.scheme) ? parsed.scheme : DEFAULT_SETTINGS.scheme,
+    scanCount: clamp(Number(parsed.scanCount) || DEFAULT_SETTINGS.scanCount, 10, 1000),
+    maxValueBytes: clamp(Number(parsed.maxValueBytes) || DEFAULT_SETTINGS.maxValueBytes, 64 * 1024, 64 * 1024 * 1024),
+    cliHistoryLimit: clamp(Number(parsed.cliHistoryLimit) || DEFAULT_SETTINGS.cliHistoryLimit, 50, 5000),
+  };
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -1,12 +1,17 @@
 import { icon } from "../core/icons";
 import { bytes, clip, decodeJsonString, esc, htmlPreviewDocument, keyPrefix, markdownToHtml, num, safeJson, ttl, typeLabel } from "../core/format";
 import type { RedisValue } from "../core/api";
-import { currentConnection, type ConnectionKey, type ValueViewMode, type ViewState } from "../core/store";
+import { currentConnection, currentDb, type ConnectionKey, type ValueViewMode, type ViewState } from "../core/store";
 import { settings } from "../theme/settings";
-import { emptyState, iconBtn, pill } from "../ui/kit";
+import { emptyState, iconBtn, pill, segmented } from "../ui/kit";
 
 const TYPES = ["all", "string", "hash", "list", "set", "zset", "stream"];
 
+/**
+ * Keys = the key space on the left, the selected value on the right. The left
+ * column is the filtered packet list; the right column is the detail tree of
+ * one key, with its metadata as fields rather than as floating badges.
+ */
 export function browserView(s: ViewState): string {
   const conn = currentConnection();
   if (!conn) return emptyState("还没有连接", "先保存一个连接，才能浏览键空间。", { label: "新建连接", action: "new-connection" });
@@ -15,33 +20,34 @@ export function browserView(s: ViewState): string {
   for (const key of s.keys) counts.set(key.type, (counts.get(key.type) ?? 0) + 1);
 
   const chips = TYPES.map(
-    (t) => `<button class="chip ${s.keyType === t ? "active" : ""}" data-key-type="${t}">${t === "all" ? "全部" : typeLabel(t)}<span class="chip-count">${t === "all" ? s.keys.length : counts.get(t) ?? 0}</span></button>`,
+    (t) => `<button class="chip ${s.keyType === t ? "active" : ""}" data-key-type="${t}" aria-pressed="${s.keyType === t}">${t === "all" ? "全部" : typeLabel(t)}<span class="chip-count">${t === "all" ? s.keys.length : counts.get(t) ?? 0}</span></button>`,
   ).join("");
 
-  return `<div class="browser">
-    <section class="card browser-keys">
-      <header class="card-head" style="gap:8px;flex-wrap:wrap">
-        <div class="search-mini grow" style="max-width:260px">${icon("search", 13)}<input id="key-pattern" value="${esc(s.keyPattern)}" placeholder="SCAN MATCH（例如 user:*）" spellcheck="false" data-key-pattern /></div>
-        <button class="btn sm" data-action="scan-reset">${icon("refresh", 12)} SCAN</button>
-        <span class="spacer"></span>
-        <span class="card-meta">${num(s.keyScanned)} scanned · cursor ${s.keyCursor}</span>
-      </header>
-      <div class="browser-chips">${chips}<span class="spacer"></span><button class="chip ${settings.get("keyGrouping") ? "active" : ""}" data-action="toggle-grouping" title="按前缀分组">${icon("folder", 11)} 分组</button></div>
+  return `<div class="filterbar">
+    <div class="search-field mono wide">${icon("search", 12)}<input id="key-filter" value="${esc(s.keyQuery)}" placeholder="筛选已扫到的键名" spellcheck="false" aria-label="筛选键名" /></div>
+    <div class="search-field mono narrow">${icon("filter", 12)}<input id="key-pattern" value="${esc(s.keyPattern)}" placeholder="SCAN MATCH，如 user:*" spellcheck="false" aria-label="SCAN 匹配模式" /></div>
+    <button class="btn sm" data-action="scan-reset">${icon("refresh", 11)} SCAN</button>
+    <button class="chip ${settings.get("keyGrouping") ? "active" : ""}" data-action="toggle-grouping" title="按前缀分组显示" aria-pressed="${settings.get("keyGrouping")}">${icon("folder", 11)} 前缀分组</button>
+    <span class="filterbar-meta">db${currentDb(conn)} · ${num(s.keyScanned)} scanned · cursor ${s.keyCursor}</span>
+  </div>
+  <div class="browser">
+    <section class="browser-keys" aria-label="键列表">
+      <div class="key-filters">${chips}</div>
       <div class="key-list scroll">${keyList(s)}</div>
       <div class="browser-foot">
-        <span class="mono faint">${num(s.keyScanned)} keys · ${s.keyDone ? "SCAN 结束" : "可继续扫描"}</span>
+        <span class="mono">${num(s.keys.length)} keys${s.keyDone ? " · SCAN 结束" : " · 可继续扫描"}</span>
         <span class="spacer"></span>
         ${s.scanning ? `<span class="spinner"></span>` : ""}
-        <button class="btn sm" data-action="scan-more" ${s.keyDone || s.scanning ? "disabled" : ""}>继续 SCAN ${icon("chevronRight", 11)}</button>
+        <button class="btn sm" data-action="scan-more" ${s.keyDone || s.scanning ? "disabled" : ""}>继续 SCAN ${icon("chevronRight", 10)}</button>
       </div>
     </section>
-    <section class="card browser-value">${valuePanel(s)}</section>
+    <section class="browser-value" aria-label="键值">${valuePanel(s)}</section>
   </div>`;
 }
 
 function keyList(s: ViewState): string {
   const q = s.keyQuery.toLowerCase();
-  let keys = s.keys.filter((k) => (s.keyType === "all" || k.type === s.keyType) && (!q || k.key.toLowerCase().includes(q)));
+  const keys = s.keys.filter((k) => (s.keyType === "all" || k.type === s.keyType) && (!q || k.key.toLowerCase().includes(q)));
   if (!keys.length) {
     return `<div class="key-list-empty">${s.scanning ? `<span class="spinner"></span> 正在 SCAN…` : s.keys.length ? "没有匹配当前筛选的键" : "SCAN 没有返回键，试着放宽匹配模式"}</div>`;
   }
@@ -69,7 +75,7 @@ function keyList(s: ViewState): string {
       continue;
     }
     const collapsed = s.collapsedGroups[prefix] ?? false;
-    html += `<button class="key-group" data-group="${esc(prefix)}">${icon(collapsed ? "chevronRight" : "chevronDown", 11)}<b>${esc(prefix)}</b><span class="faint">${list.length}</span></button>`;
+    html += `<button class="key-group" data-group="${esc(prefix)}" aria-expanded="${!collapsed}">${icon(collapsed ? "chevronRight" : "chevronDown", 10)}<b>${esc(prefix)}</b><span class="spacer"></span><span class="count">${list.length}</span></button>`;
     if (!collapsed) html += list.map((k) => row(k, true)).join("");
   }
   html += loose.map((k) => row(k)).join("");
@@ -78,9 +84,9 @@ function keyList(s: ViewState): string {
 
 function keyRow(k: ConnectionKey, active: boolean, indent: boolean): string {
   const t = ttl(k.ttlMs);
-  return `<button class="key-row ${active ? "active" : ""}" data-key="${esc(k.key)}" title="${esc(k.key)}">
-    <span class="k mono ${indent ? "indented" : ""}">${esc(k.key)}</span>
-    <span class="meta"><span class="ttl mono ${t.persistent ? "faint" : ""}">${esc(t.short)}</span>${pill(k.type, typeLabel(k.type))}</span>
+  return `<button class="key-row ${active ? "active" : ""}" data-key="${esc(k.key)}" tabindex="${active ? "0" : "-1"}" title="${esc(k.key)} · ${typeLabel(k.type)} · ${t.short}" aria-current="${active}">
+    <span class="k ${indent ? "indented" : ""}">${esc(k.key)}</span>
+    <span class="meta"><span class="ttl ${t.persistent ? "faint" : ""}">${esc(t.short)}</span>${pill(k.type, typeLabel(k.type))}</span>
   </button>`;
 }
 
@@ -90,29 +96,41 @@ function keyRow(k: ConnectionKey, active: boolean, indent: boolean): string {
 
 function valuePanel(s: ViewState): string {
   if (s.valueLoading && !s.value) return `<div class="value-loading"><span class="spinner"></span> 读取值…</div>`;
-  if (s.valueError) return `<div class="card-body">${`<div class="notice err">${esc(s.valueError)}</div>`}</div>`;
+  if (s.valueError) return `<div class="pad-inline"><div class="notice err">${icon("xCircle", 14)}<div class="notice-body"><b>读取失败</b><span>${esc(s.valueError)}</span></div></div></div>`;
   const v = s.value;
-  if (!v) return `<div class="value-empty">${icon("key", 22)}<div>从左侧选择一个键查看内容</div></div>`;
+  if (!v) return `<div class="value-empty">${icon("key", 20)}<div>从左侧选择一个键查看内容</div></div>`;
 
   const t = ttl(v.ttlMs);
-  const head = `<header class="value-head">
-    <div class="value-title">
-      ${pill(v.type, typeLabel(v.type))}
-      <span class="mono ellipsis" style="font-size:13px">${esc(v.key)}</span>
-    </div>
+  const head = `<div class="value-head">
+    <div class="value-title">${pill(v.type, typeLabel(v.type))}<span class="key-name" title="${esc(v.key)}">${esc(v.key)}</span></div>
     <div class="value-meta">
-      <span>T TL <b class="mono">${esc(t.short)}</b></span>
-      <span>大小 <b class="mono">${bytes(v.sizeBytes)}</b></span>
-      <span>编码 <b class="mono">${esc(v.encoding || "—")}</b></span>
+      <span>ttl <b>${esc(t.short)}</b></span>
+      <span>size <b>${bytes(v.sizeBytes)}</b></span>
+      <span>encoding <b>${esc(v.encoding || "—")}</b></span>
     </div>
-    <div class="row" style="margin-left:auto">
+    <div class="value-actions">
       ${iconBtn("copy", "copy-key", "复制键名")}
       ${iconBtn("refresh", "reload-value", "重新读取")}
       ${iconBtn("trash", "delete-key", "删除键", "danger")}
     </div>
-  </header>`;
+  </div>`;
 
-  return `${head}<div class="value-body ${v.type === "string" ? "value-body-string" : "scroll"}">${valueBody(v, s.valueMode)}</div>${valueFoot(v)}`;
+  const stringTools = v.type === "string" ? valueTools(s) : "";
+  return `${head}${stringTools}<div class="value-body ${v.type === "string" ? "value-body-string" : "scroll"}">${valueBody(v, s.valueMode)}</div>${valueFoot(v)}`;
+}
+
+function valueTools(s: ViewState): string {
+  const raw = String(s.value?.stringValue ?? "");
+  const json = safeJson(raw);
+  const items: { id: ValueViewMode; label: string }[] = [
+    { id: "raw", label: "原始" },
+    { id: "json", label: "JSON" },
+    { id: "hex", label: "Hex" },
+    { id: "html", label: "HTML 预览" },
+    { id: "markdown", label: "MD 预览" },
+  ].filter((i) => i.id !== "json" || json.ok) as { id: ValueViewMode; label: string }[];
+  const active = s.valueMode === "json" && !json.ok ? "raw" : s.valueMode;
+  return `<div class="value-tools"><span class="mlabel">格式</span>${segmented(items, active, "view-mode")}</div>`;
 }
 
 function valueBody(v: RedisValue, viewMode: ValueViewMode): string {
@@ -122,31 +140,32 @@ function valueBody(v: RedisValue, viewMode: ValueViewMode): string {
       return stringBody(v, maxBytes, viewMode);
     case "hash": {
       const entries = Object.entries(v.hash ?? {});
+      const total = entries.length;
       const rows = entries
-        .map(([field, value]) => `<tr><td class="key-cell">${esc(field)}</td><td class="mono">${esc(clip(value, 400).text)}${value.length > 400 ? " …" : ""}</td></tr>`)
+        .map(([field, value]) => `<tr><td class="key-cell">${esc(field)}</td><td class="key-cell">${esc(clip(value, 400).text)}${value.length > 400 ? " …" : ""}</td></tr>`)
         .join("");
-      return `<table class="tbl"><thead><tr><th style="width:32%">field</th><th>value</th></tr></thead><tbody>${rows || `<tr class="empty-row"><td colspan="2">空 Hash</td></tr>`}</tbody></table>
-        <form class="hash-add" id="hash-form">
-          <input class="input mono" name="field" placeholder="field" autocomplete="off" required />
-          <input class="input mono grow" name="value" placeholder="value" autocomplete="off" />
-          <button class="btn primary" type="submit">${icon("plus", 13)} 写入字段</button>
+      return `<div class="tbl-wrap"><table class="tbl"><thead><tr><th style="width:32%">field<span class="mlabel" style="margin-left:6px">${num(total)}</span></th><th>value</th></tr></thead><tbody>${rows || `<tr class="empty-row"><td colspan="2">空 Hash</td></tr>`}</tbody></table></div>
+        <form class="hash-add" id="hash-form" data-key="${esc(v.key)}">
+          <input class="input mono" name="field" placeholder="field" autocomplete="off" required aria-label="字段名" />
+          <input class="input mono grow" name="value" placeholder="value" autocomplete="off" aria-label="字段值" />
+          <button class="btn primary" type="submit">${icon("plus", 12)} 写入字段</button>
         </form>`;
     }
     case "list": {
-      const rows = (v.list ?? []).map((item, i) => `<tr><td class="num-cell faint" style="width:70px">${i}</td><td class="mono">${esc(clip(item, 800).text)}</td></tr>`).join("");
+      const rows = (v.list ?? []).map((item, i) => `<tr><td class="num-cell faint" style="width:64px">${i}</td><td class="key-cell">${esc(clip(item, 800).text)}</td></tr>`).join("");
       return `<table class="tbl"><thead><tr><th>index</th><th>value</th></tr></thead><tbody>${rows || `<tr class="empty-row"><td colspan="2">空 List</td></tr>`}</tbody></table>`;
     }
     case "set": {
-      const rows = (v.set ?? []).map((m) => `<tr><td class="mono">${esc(m)}</td></tr>`).join("");
+      const rows = (v.set ?? []).map((m) => `<tr><td class="key-cell">${esc(m)}</td></tr>`).join("");
       return `<table class="tbl"><thead><tr><th>member</th></tr></thead><tbody>${rows || `<tr class="empty-row"><td>空 Set</td></tr>`}</tbody></table>`;
     }
     case "zset": {
-      const rows = (v.zset ?? []).map((e, i) => `<tr><td class="num-cell" style="width:64px">${i + 1}</td><td class="mono">${esc(e.member)}</td><td class="num-cell">${e.score}</td></tr>`).join("");
+      const rows = (v.zset ?? []).map((e, i) => `<tr><td class="num-cell faint" style="width:56px">${i + 1}</td><td class="key-cell">${esc(e.member)}</td><td class="num-cell">${e.score}</td></tr>`).join("");
       return `<table class="tbl"><thead><tr><th>#</th><th>member</th><th style="text-align:right">score</th></tr></thead><tbody>${rows || `<tr class="empty-row"><td colspan="3">空 ZSet</td></tr>`}</tbody></table>`;
     }
     case "stream": {
       const rows = (v.stream ?? [])
-        .map((entry) => `<tr><td class="mono faint" style="width:190px">${esc(entry.id)}</td><td><pre class="mono pre-inline">${esc(JSON.stringify(entry.values, null, 2))}</pre></td></tr>`)
+        .map((entry) => `<tr><td class="key-cell faint" style="width:180px">${esc(entry.id)}</td><td><pre class="mono pre-inline">${esc(JSON.stringify(entry.values, null, 2))}</pre></td></tr>`)
         .join("");
       return `<table class="tbl"><thead><tr><th>id</th><th>fields</th></tr></thead><tbody>${rows || `<tr class="empty-row"><td colspan="2">空 Stream</td></tr>`}</tbody></table>`;
     }
@@ -158,17 +177,9 @@ function valueBody(v: RedisValue, viewMode: ValueViewMode): string {
 function stringBody(v: RedisValue, maxBytes: number, viewMode: ValueViewMode): string {
   const raw = String(v.stringValue ?? "");
   const tooBig = v.sizeBytes > maxBytes;
-  const limit = tooBig ? Math.min(maxBytes, 200_000) : 200_000;
+  const limit = Math.min(maxBytes, 200_000);
   const json = safeJson(raw);
   const activeMode = viewMode === "json" && !json.ok ? "raw" : viewMode;
-  const tab = (mode: ValueViewMode, label: string, disabled = false) => `<button class="${activeMode === mode ? "active" : ""}" data-seg-action="view-mode" data-seg-value="${mode}" aria-pressed="${activeMode === mode}" ${disabled ? "disabled" : ""}>${label}</button>`;
-  const tabs = `<div class="segmented value-formats" role="group" aria-label="值显示格式">
-    ${tab("raw", "原始")}
-    ${tab("json", "JSON", !json.ok)}
-    ${tab("hex", "Hex")}
-    ${tab("html", "HTML 预览")}
-    ${tab("markdown", "MD 预览")}
-  </div>`;
   const previewMode = activeMode === "html" || activeMode === "markdown";
   const shown = clip(previewMode ? decodeJsonString(raw).text : raw, limit);
   let body: string;
@@ -188,8 +199,8 @@ function stringBody(v: RedisValue, maxBytes: number, viewMode: ValueViewMode): s
     default:
       body = `<pre class="code-box mono" data-view="raw">${esc(shown.text)}</pre>`;
   }
-  const notice = shown.truncated ? `<div class="notice info">值较大（${bytes(v.sizeBytes)}），只渲染了前 ${bytes(shown.text.length)}。可在设置中调整单次载入上限。</div>` : "";
-  return tabs + body + notice;
+  const notice = shown.truncated ? `<div class="pad-inline pad-bottom"><div class="notice warn">${icon("alert", 13)}<div class="notice-body"><b>只渲染了前 ${bytes(shown.text.length)}</b><span>该值共 ${bytes(v.sizeBytes)}，可在设置中调整单次载入上限。</span></div></div></div>` : "";
+  return body + notice;
 }
 
 function hexDump(text: string): string {
@@ -205,9 +216,8 @@ function hexDump(text: string): string {
 }
 
 function valueFoot(v: RedisValue): string {
-  if (v.type !== "hash") {
-    return `<footer class="value-foot"><span class="mono faint">${ttl(v.ttlMs).label} · ${bytes(v.sizeBytes)} · ${esc(v.encoding || "—")}</span><span class="spacer"></span><span class="faint" style="font-size:11px">当前版本只读浏览该类型</span></footer>`;
-  }
-  return `<footer class="value-foot"><span class="mono faint">${Object.keys(v.hash ?? {}).length} fields · ${bytes(v.sizeBytes)}</span><span class="spacer"></span><span class="faint" style="font-size:11px">写入会立即生效</span></footer>`;
+  const count =
+    v.type === "hash" ? `${Object.keys(v.hash ?? {}).length} fields` : v.type === "list" ? `${(v.list ?? []).length} items` : v.type === "set" ? `${(v.set ?? []).length} members` : v.type === "zset" ? `${(v.zset ?? []).length} members` : v.type === "stream" ? `${(v.stream ?? []).length} entries` : `${bytes(v.sizeBytes)}`;
+  const writable = v.type === "hash";
+  return `<div class="value-foot"><span>${esc(count)}</span><span>·</span><span>${esc(ttl(v.ttlMs).label)}</span><span>·</span><span>${esc(v.encoding || "—")}</span><span class="spacer"></span><span>${writable ? "写入字段会立即生效" : "该类型当前只读，可在命令行写入"}</span></div>`;
 }
-

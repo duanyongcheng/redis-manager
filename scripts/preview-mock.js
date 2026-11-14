@@ -88,6 +88,38 @@
     ["avatar", "https://cdn.example.com/a/1002.png"], ["locale", "zh-CN"], ["verified", "true"], ["credits", "18420"],
   ].forEach(([k, v]) => (hash[k] = v));
 
+  // One key holds a small HTML document so the preview modes are reachable
+  // from the fixture without a live Redis.
+  const htmlPreview = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:14px/1.7 -apple-system,"PingFang SC",sans-serif;padding:24px 28px;color:#1d211c}table{border-collapse:collapse;width:100%}td,th{border:1px solid #c8ccc0;padding:7px 10px;text-align:left;font-size:13px}th{background:#f4f2ec}$</style></head><body><h3 style="margin:0 0 12px">认/申购交易业务申请表</h3><p style="color:#5f6b76;margin:0 0 16px">由上游系统写入 <code>preview:quoted-html</code>，用于验证预览渲染与安全隔离。</p><table><tr><th>字段</th><th>值</th></tr>${Array.from({ length: 22 }, (_, i) => `<tr><td>附加项目 ${i + 1}</td><td>用于滚动位置验证的示例内容</td></tr>`).join("")}</table></body></html>`;
+  const markdownPreview = "# 业务说明\n\n**预览示例**\n\n| 项目 | 值 |\n| --- | --- |\n| 产品 | 示例 |";
+  function previewStringValue(key) {
+    if (key === "leaderboard") return "";
+    if (key === "cache:home:feed") return JSON.stringify(htmlPreview);
+    if (key === "lock:order:1002") return JSON.stringify(markdownPreview);
+    return '{"home":{"feed":["sku:88","sku:91"]},"updated":"2026-11-06T02:11:03Z"}';
+  }
+
+  // Screenshot sessions start with a short history. The real app samples every
+  // 4 seconds and fills this in; the fixture seeds it so charts and the metric
+  // stream can be reviewed the way they look after a minute of use.
+  window.__RM_PREVIEW_SEED__ = (() => {
+    const samples = [];
+    const now = Date.now();
+    for (let i = 45; i >= 1; i -= 1) {
+      const wave = Math.sin(i / 3.4) * 620 + Math.sin(i / 9.1) * 240;
+      samples.push({
+        at: now - i * 4000,
+        ops: Math.round(13_800 + wave + ((i * 37) % 90)),
+        clients: 296 + Math.round(Math.sin(i / 5) * 9) + ((i * 3) % 5),
+        used: 3.34e9 + i * 1.6e6,
+        latency: 0.78 + ((i * 13) % 17) / 100,
+        netIn: 240_000 + ((i * 7919) % 90_000),
+        netOut: 610_000 + ((i * 3571) % 120_000),
+      });
+    }
+    return samples;
+  })();
+
   // Lets the screenshot script type a few commands into the CLI.
   window.__RM_PREVIEW_DEMO__ = async (lines) => {
     for (const line of lines) {
@@ -133,7 +165,7 @@
     getValue: async (_id, _db, key) => ({
       key, type: key.startsWith("user:") ? "hash" : key === "leaderboard" ? "zset" : "string",
       ttlMs: 28800_000, sizeBytes: 486, encoding: "listpack",
-      stringValue: key === "leaderboard" ? "" : '{"home":{"feed":["sku:88","sku:91"]},"updated":"2026-11-06T02:11:03Z"}',
+      stringValue: previewStringValue(key),
       hash: key.startsWith("user:") ? hash : undefined,
       zset: key === "leaderboard" ? [{ member: "user:1002", score: 9840 }, { member: "user:1044", score: 9112 }, { member: "user:1013", score: 8770 }] : undefined,
     }),

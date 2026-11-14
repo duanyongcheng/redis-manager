@@ -1,10 +1,14 @@
-/** Formatting helpers shared by every theme. Pure functions, no DOM. */
+/** Formatting helpers for every view. Pure functions, no DOM. */
 
 export const esc = (value: unknown): string =>
   String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
 
 export const num = (value: number | null | undefined): string =>
   Number.isFinite(Number(value)) ? Number(value).toLocaleString("en-US") : "—";
+
+/** Counts read as counts: whole numbers, no decimals a counter never has. */
+export const count = (value: number | null | undefined): string =>
+  Number.isFinite(Number(value)) ? Math.round(Number(value)).toLocaleString("en-US") : "—";
 
 export function compact(value: number | null | undefined): string {
   const n = Number(value);
@@ -79,8 +83,11 @@ export function duration(seconds: number | null | undefined): string {
   return `${s}s`;
 }
 
-export function timeAgo(unixSeconds: number | null | undefined): string {
-  const s = Math.max(0, Date.now() / 1000 - Number(unixSeconds || 0));
+/** Accepts seconds or milliseconds; Redis reports epoch seconds, the UI keeps ms. */
+export function timeAgo(stamp: number | null | undefined): string {
+  const value = Number(stamp || 0);
+  const seconds = value > 1e11 ? value / 1000 : value;
+  const s = Math.max(0, Date.now() / 1000 - seconds);
   if (s < 60) return `${Math.floor(s)}s 前`;
   if (s < 3600) return `${Math.floor(s / 60)}m 前`;
   if (s < 86400) return `${Math.floor(s / 3600)}h 前`;

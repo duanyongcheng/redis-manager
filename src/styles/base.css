@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Base: reset, typography, scrollbars — all derived from theme tokens.
+   Base: reset, typography, browser surfaces — all derived from tokens.
    ========================================================================== */
 
 *,
@@ -28,13 +28,15 @@ body {
 
 h1, h2, h3, h4, h5 {
   margin: 0;
-  font-weight: var(--display-weight);
-  letter-spacing: var(--display-tracking);
+  font-weight: 600;
+  letter-spacing: -.005em;
 }
 
-p {
-  margin: 0;
-}
+h1 { font-size: var(--fs-title); }
+h2 { font-size: 13px; }
+h3 { font-size: var(--fs-ui); }
+
+p { margin: 0; }
 
 button {
   font: inherit;
@@ -44,6 +46,8 @@ button {
   padding: 0;
   cursor: pointer;
 }
+
+button:disabled { cursor: default; }
 
 input,
 select,
@@ -58,6 +62,7 @@ textarea {
 a {
   color: var(--accent);
   text-decoration: none;
+  text-underline-offset: 2px;
 }
 
 ul, ol {
@@ -66,9 +71,20 @@ ul, ol {
   list-style: none;
 }
 
+code, kbd, pre {
+  font-family: var(--font-mono);
+}
+
+/* --- browser surfaces --------------------------------------------------- */
+
 ::selection {
   background: var(--accent);
   color: var(--fg-on-accent);
+}
+
+input,
+textarea {
+  caret-color: var(--accent);
 }
 
 ::-webkit-scrollbar {
@@ -77,39 +93,58 @@ ul, ol {
 }
 ::-webkit-scrollbar-thumb {
   background: var(--line-strong);
-  border-radius: var(--radius-pill);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-3);
   border: 3px solid transparent;
   background-clip: padding-box;
 }
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-:root[data-theme="terminal"] ::-webkit-scrollbar-thumb {
-  border-radius: 0;
-  border: 0;
-  background: var(--line-strong);
+:focus-visible {
+  outline: 1.5px solid var(--focus);
+  outline-offset: 1px;
 }
 
-/* --- utilities --------------------------------------------------------- */
+/* --- utilities ---------------------------------------------------------- */
+
 .icon {
   flex: none;
   display: inline-block;
   vertical-align: middle;
 }
-.mono { font-family: var(--font-mono); }
-.num { font-variant-numeric: var(--numbers); }
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
 .dim { color: var(--fg-2); }
 .faint { color: var(--fg-3); }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
 .err { color: var(--err); }
 .acc { color: var(--accent); }
+
 .grow { flex: 1; min-width: 0; }
-.row { display: flex; align-items: center; gap: var(--gap); }
+.row { display: flex; align-items: center; gap: var(--space-2); }
 .col { display: flex; flex-direction: column; min-height: 0; }
 .nowrap { white-space: nowrap; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { flex: 1; }
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -117,22 +152,64 @@ ul, ol {
   overflow: hidden;
   clip: rect(0 0 0 0);
 }
+
+/* The analyser's one label voice: small tracked mono, never a sentence. */
 .label {
-  font-size: 10px;
-  letter-spacing: var(--label-tracking);
-  text-transform: var(--label-transform);
-  color: var(--fg-3);
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  font-weight: 400;
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-2);
 }
+
+.mlabel {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  letter-spacing: var(--tracking-label);
+  color: var(--fg-3);
+  text-transform: uppercase;
+}
+
 .scroll { overflow: auto; }
 .hidden { display: none !important; }
 
-/* Focus ring is themed, never the browser blue. */
-:focus-visible {
-  outline: 1px solid var(--line-focus);
-  outline-offset: 1px;
+/* --- shared primitives --------------------------------------------------- */
+
+/* Status is never colour alone: the dot always sits beside a worded state. */
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--fg-3);
+}
+.status-dot.on { background: var(--ok); }
+.status-dot.warn { background: var(--warn); box-shadow: 0 0 0 2px var(--warn-soft); }
+.status-dot.off { background: var(--err); }
+.status-dot.idle { background: var(--fg-3); }
+
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border: 1.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
 }
 
-:root[data-theme="terminal"] :focus-visible {
-  outline-offset: 0;
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
 }

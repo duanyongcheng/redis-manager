@@ -7,6 +7,8 @@ export interface Insight {
   title: string;
   detail: string;
   action?: { label: string; view: "monitor" | "browser" | "cli" | "overview" };
+  /** Metric key the finding watches, so the analyser can point at the sample. */
+  watch?: "evicted" | "memory" | "latency" | "blocked" | "slow" | "danger" | "ttl";
 }
 
 const DANGEROUS = new Set(["KEYS", "FLUSHALL", "FLUSHDB", "DEBUG", "MONITOR", "SHUTDOWN", "CONFIG"]);
@@ -29,6 +31,7 @@ export function deriveInsights(overview: OverviewSnapshot | null): Insight[] {
         title: `内存已用 ${memPct.toFixed(0)}%`,
         detail: `上限 ${bytes(overview.maxMemoryBytes)} · 策略 ${policy || "noeviction"}${evicted ? ` · 已驱逐 ${num(evicted)} 次` : ""}`,
         action: { label: "调整策略", view: "monitor" },
+        watch: "memory",
       });
     } else if (memPct >= 65) {
       out.push({
@@ -63,6 +66,7 @@ export function deriveInsights(overview: OverviewSnapshot | null): Insight[] {
       id: "slow",
       tone: "warn",
       title: `${slow[0].name.toUpperCase()} 单次平均 ${(slow[0].usecPerCall / 1000).toFixed(1)} ms`,
+      watch: "slow",
       detail: "存在慢命令，可能阻塞单线程事件循环",
       action: { label: "慢日志", view: "monitor" },
     });
@@ -70,7 +74,7 @@ export function deriveInsights(overview: OverviewSnapshot | null): Insight[] {
 
   const blocked = Number(info["blocked_clients"] ?? 0);
   if (blocked > 0) {
-    out.push({ id: "blocked", tone: "warn", title: `${num(blocked)} 个客户端处于阻塞状态`, detail: "可能来自 BLPOP / BRPOP / WAIT 等阻塞命令", action: { label: "客户端", view: "monitor" } });
+    out.push({ id: "blocked", tone: "warn", title: `${num(blocked)} 个客户端处于阻塞状态`, detail: "可能来自 BLPOP / BRPOP / WAIT 等阻塞命令", action: { label: "客户端", view: "monitor" }, watch: "blocked" });
   }
 
   const rejectedClients = Number(info["rejected_connections"] ?? 0);
@@ -86,6 +90,7 @@ export function deriveInsights(overview: OverviewSnapshot | null): Insight[] {
       title: `${ttlSpaces.map((ks) => `db${ks.db}`).join(" / ")} 全部键均未设置 TTL`,
       detail: "没有过期策略，持久化后恢复时数据量可能超出预期",
       action: { label: "浏览键", view: "browser" },
+      watch: "ttl",
     });
   }
 
@@ -97,6 +102,7 @@ export function deriveInsights(overview: OverviewSnapshot | null): Insight[] {
       title: `${danger.map((c) => c.name.toUpperCase()).join(" / ")} 使用中`,
       detail: "这类命令可能阻塞实例，建议改用 SCAN / INFO 等安全替代",
       action: { label: "CLI", view: "cli" },
+      watch: "danger",
     });
   }
 

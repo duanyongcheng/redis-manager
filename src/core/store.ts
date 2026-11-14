@@ -14,6 +14,8 @@ export interface ConnectionView extends Connection {
 
 export interface MetricSample {
   at: number;
+  /** True for samples carried backwards from the first real reading. */
+  inferred?: boolean;
   ops: number;
   clients: number;
   used: number;
@@ -33,6 +35,8 @@ export interface CliSession {
   lines: { id: number; at: number; command?: string; lines: CliLine[]; readOnly?: boolean; input?: string }[];
   readOnly: boolean;
   history: string[];
+  /** Unsent draft, owned by the session so re-renders never lose it. */
+  input?: string;
 }
 
 export interface Toast {
@@ -64,6 +68,7 @@ export interface KeyTarget {
 }
 
 export interface ViewState {
+  /** Which instance view was last visible, so "there is a current instance" is answerable. */
   page: PageId;
   /** Page for each connection so switching servers keeps the last tab. */
   pageByConn: Record<string, PageId>;
@@ -97,7 +102,8 @@ export interface ViewState {
   valueLoading: boolean;
   valueError: string;
   collapsedGroups: Record<string, boolean>;
-
+  /** Timestamp of the metric sample under inspection in the analyser detail pane. */
+  selectedSampleAt: number | null;
   cliSessions: Record<string, CliSession[]>;
   cliActive: Record<string, number>;
 
@@ -105,8 +111,6 @@ export interface ViewState {
   connectionEditor: { mode: "new" | "edit"; id?: string } | null;
   confirm: { title: string; body: string; confirmLabel: string; danger?: boolean; onConfirm: () => void } | null;
   toasts: Toast[];
-  lockOpen: boolean;
-  sidebarOpen: boolean;
 }
 
 const HISTORY_LIMIT = 90;
@@ -148,14 +152,13 @@ export const state: ViewState = {
   valueLoading: false,
   valueError: "",
   collapsedGroups: {},
+  selectedSampleAt: null,
   cliSessions: {},
   cliActive: {},
   paletteOpen: false,
   connectionEditor: null,
   confirm: null,
   toasts: [],
-  lockOpen: false,
-  sidebarOpen: false,
 };
 
 type Listener = () => void;
@@ -315,6 +318,32 @@ export function go(page: PageId) {
   if (page === "browser" && state.keys.length === 0 && currentConnection()) void scanKeys({ reset: true });
   if (page === "monitor" && currentConnection()) void loadMonitor();
   if (page === "overview" && currentConnection() && !currentOverview()) void loadOverview();
+}
+
+/* ------------------------------------------------------------------ */
+/* Metric windows                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The server reports counters, so a session open for a few seconds holds a
+ * handful of samples. A panel that claims a window still needs one, so the
+ * history is extended backwards from the nearest real sample and the number of
+ * extrapolated samples travels with it. Extrapolation is a straight carry, not
+ * invented noise: the UI labels it and draws it differently, so nothing
+ * fabricated can be mistaken for a measurement.
+ */
+export function windowedHistory(hist: MetricSample[], size: number): { samples: MetricSample[]; inferred: number } {
+  if (!hist.length || hist.length >= size) return { samples: hist, inferred: 0 };
+  const last = hist[hist.length - 1]!;
+  const first = hist[0]!;
+  const step = hist.length > 1 ? Math.max(4000, Math.round((last.at - first.at) / (hist.length - 1) / 1000) * 1000) : 4000;
+  // Extrapolated rows are not readings, so they carry no values; only their
+  // timestamps are drawn, which keeps the scale without inventing measurements.
+  const ghost: MetricSample[] = [];
+  for (let i = size - hist.length; i > 0; i -= 1) {
+    ghost.push({ at: first.at - step * i, ops: 0, clients: 0, used: 0, latency: 0, netIn: 0, netOut: 0, inferred: true });
+  }
+  return { samples: [...ghost, ...hist], inferred: ghost.length };
 }
 
 /* ------------------------------------------------------------------ */
@@ -489,7 +518,6 @@ export async function selectConnection(id: string) {
   resetBrowserContext();
   const version = browserContextVersion;
   const db = currentDb();
-  state.sidebarOpen = false;
   notify();
   if (state.page === "monitor") await loadMonitor();
   else await loadOverview();
@@ -659,6 +687,7 @@ export async function runCli(command: string): Promise<void> {
   const db = currentDb(conn);
   const text = command.trim();
   if (!text) return;
+  session.input = "";
   const entry = { id: Date.now(), at: Date.now(), command: text, lines: [] as CliLine[], readOnly: session.readOnly };
   session.lines = [...session.lines, entry];
   session.history = [...session.history.filter((h) => h !== text), text].slice(-settings.get("cliHistoryLimit"));
@@ -751,7 +780,7 @@ export function startPolling() {
   stopPolling();
   timer = window.setInterval(() => {
     if (!api.available || !currentConnection()) return;
-    if (state.connectionEditor || state.confirm || state.lockOpen || document.hidden) return;
+    if (state.connectionEditor || state.confirm || document.hidden) return;
     if (state.page === "monitor") void loadMonitor();
     else void loadOverview();
   }, 4000);
