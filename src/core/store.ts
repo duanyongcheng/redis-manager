@@ -1,4 +1,16 @@
-import { api, application, errorMessage, redis, type AppInfo, type Connection, type KeyPage, type MonitorSnapshot, type OverviewSnapshot, type RedisValue } from "./api";
+import {
+  api,
+  application,
+  errorMessage,
+  redis,
+  type AppInfo,
+  type Connection,
+  type CredentialStorageMode,
+  type KeyPage,
+  type MonitorSnapshot,
+  type OverviewSnapshot,
+  type RedisValue,
+} from "./api";
 import { settings } from "../theme/settings";
 
 export type PageId = "overview" | "browser" | "cli" | "monitor" | "connections" | "settings";
@@ -83,6 +95,9 @@ export interface ViewState {
   appInfoLoading: boolean;
   appInfoError: string;
   openingUpdater: boolean;
+  credentialStorage: CredentialStorageMode;
+  credentialKeychainPending: number;
+  credentialStorageSaving: boolean;
 
   overview: Record<string, OverviewSnapshot>;
   history: Record<string, MetricSample[]>;
@@ -135,6 +150,9 @@ export const state: ViewState = {
   appInfoLoading: false,
   appInfoError: "",
   openingUpdater: false,
+  credentialStorage: "local",
+  credentialKeychainPending: 0,
+  credentialStorageSaving: false,
   overview: {},
   history: {},
   monitor: {},
@@ -390,6 +408,58 @@ export async function checkForUpdates(): Promise<void> {
   }
 }
 
+function normalizeCredentialMode(mode: string | undefined): CredentialStorageMode {
+  return mode === "keychain" ? "keychain" : "local";
+}
+
+export async function loadCredentialStorage(): Promise<void> {
+  if (!api.available) return;
+  try {
+    const status = await redis.getCredentialStorage();
+    state.credentialStorage = normalizeCredentialMode(status.mode);
+    state.credentialKeychainPending = Math.max(0, Number(status.keychainPending) || 0);
+    notify();
+  } catch {
+    // Keep the default local mode when running in a plain browser without Go bindings.
+  }
+}
+
+export async function setCredentialStorage(mode: CredentialStorageMode): Promise<boolean> {
+  if (state.credentialStorageSaving) return false;
+  if (!api.available) {
+    notify();
+    toast("err", "切换密码存储失败", "未检测到 Go 服务");
+    return false;
+  }
+  state.credentialStorageSaving = true;
+  notify();
+  try {
+    const status = await redis.setCredentialStorage(mode);
+    state.credentialStorage = normalizeCredentialMode(status.mode);
+    state.credentialKeychainPending = Math.max(0, Number(status.keychainPending) || 0);
+    if (state.credentialStorage === "local") {
+      if (state.credentialKeychainPending > 0) {
+        toast(
+          "info",
+          "已切回本地加密存储",
+          `仍有 ${state.credentialKeychainPending} 个旧连接的密码保留在系统钥匙串，可在编辑连接中重输密码直接落盘`,
+        );
+      } else {
+        toast("ok", "密码存储已切换为本地加密", "应用更新后不再触发系统钥匙串授权弹窗");
+      }
+    } else {
+      toast("ok", "密码存储已切换为系统钥匙串", "已保存的连接密码已迁移至系统凭据存储");
+    }
+    return true;
+  } catch (error) {
+    toast("err", "切换密码存储失败", errorMessage(error));
+    return false;
+  } finally {
+    state.credentialStorageSaving = false;
+    notify();
+  }
+}
+
 export async function refreshConnections(): Promise<void> {
   if (!api.available) {
     state.serviceAvailable = false;
@@ -469,9 +539,11 @@ async function loadOverviewRequest(conn: ConnectionView, db: number, version: nu
       latencyMs: overview.latencyMs,
       error: undefined,
     });
+    if (state.credentialKeychainPending > 0) void loadCredentialStorage();
   } catch (error) {
     if (!isCurrentDatabase(conn.id, db, version)) return;
     updateConn(conn.id, { status: "off", error: errorMessage(error) });
+    if (state.credentialStorage === "local") void loadCredentialStorage();
   } finally {
     overviewRequests.delete(requestKey);
   }
@@ -738,6 +810,7 @@ export async function saveConnection(conn: Connection, password: string): Promis
       savedVersion = browserContextVersion;
     }
     await refreshConnections();
+    void loadCredentialStorage();
     if (savedVersion != null && isCurrentDatabase(conn.id, currentDb(), savedVersion) && state.page === "browser") {
       void scanKeys({ reset: true });
     }
@@ -763,6 +836,7 @@ export async function removeConnection(id: string) {
       state.connId = state.connections[0]?.id ?? null;
       resetBrowserContext();
     }
+    void loadCredentialStorage();
     notify();
     toast("ok", "连接已删除");
   } catch (error) {

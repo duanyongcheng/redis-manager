@@ -204,8 +204,8 @@ build/darwin-arm64/
 
 ## 数据存储
 
-- **连接配置**：macOS 路径为 `~/Library/Application Support/Redis Manager/connections.json`。
-- **密码**：优先使用 MyGo 系统凭据存储；不可用时回退到权限为 `0600` 的连接配置文件。
+- **连接配置**：macOS 路径为 `~/Library/Application Support/Redis Manager/connections.json`（权限 `0600`）。
+- **密码**：默认使用同目录下 `0600` 权限的本地密钥文件（`credential.key`）进行 AES-256-GCM 加密存储，避免无开发者证书签名时每次更新触发 macOS 系统钥匙串重授权；也可在「设置 -> 凭据与安全」中切换为系统钥匙串存储（`preferences.json`）。
 - **界面偏好**：配色、SCAN 参数和 CLI 默认只读等设置保存在 WebView 的 `localStorage`。
 - **CLI 会话与历史**：保存在本次应用运行的内存中，重启后不会恢复。
 

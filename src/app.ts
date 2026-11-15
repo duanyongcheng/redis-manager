@@ -14,6 +14,7 @@ import {
   go,
   loadMonitor,
   loadAppInfo,
+  loadCredentialStorage,
   loadOverview,
   notify,
   onChange,
@@ -29,6 +30,7 @@ import {
   selectConnection,
   selectDatabase,
   setCliReadOnly,
+  setCredentialStorage,
   startPolling,
   state,
   stopPolling,
@@ -515,7 +517,15 @@ const actions: Record<string, () => void | Promise<void>> = {
     if (id) void deleteConnection(id);
   },
   "reset-settings": () => {
-    confirmDialog({ title: "恢复默认设置", body: "主题、浏览与 CLI 偏好都会回到初始值。", confirmLabel: "恢复", onConfirm: () => settings.reset() });
+    confirmDialog({
+      title: "恢复默认设置",
+      body: "主题、浏览、CLI 与密码存储偏好都会回到初始值。",
+      confirmLabel: "恢复",
+      onConfirm: () => {
+        settings.reset();
+        if (state.credentialStorage !== "local") void setCredentialStorage("local");
+      },
+    });
   },
   "set-key-grouping": () => settings.patch({ keyGrouping: !settings.get("keyGrouping") }),
   "set-cli-readonly": () => settings.patch({ cliReadOnlyDefault: !settings.get("cliReadOnlyDefault") }),
@@ -801,6 +811,10 @@ document.addEventListener("change", (event) => {
   }
   const key = target.dataset.setting;
   if (!key) return;
+  if (key === "credentialStorage") {
+    void setCredentialStorage(target.value === "keychain" ? "keychain" : "local");
+    return;
+  }
   if (key === "scanCount" || key === "cliHistoryLimit" || key === "maxValueBytes") {
     settings.patch({ [key]: Number(target.value) } as never);
   }
@@ -1034,6 +1048,7 @@ async function boot() {
   window.__RM_SERVICE__ = state.serviceAvailable;
   window.__RM_DEBUG__ = { outside: window.__RM_OUTSIDE__, available: api.available, hasWindowSvc: Boolean(window.RedisService) };
   void loadAppInfo();
+  void loadCredentialStorage();
   await refreshConnections();
   // The screenshot fixture seeds a short history so charts read like a session
   // that has been open for a while; the real app never sets this.

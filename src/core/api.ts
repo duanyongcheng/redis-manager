@@ -5,11 +5,14 @@ import type {
   CLIResult,
   Connection,
   ConnectionTest,
+  CredentialStorageStatus,
   KeyPage,
   MonitorSnapshot,
   OverviewSnapshot,
   RedisValue,
 } from "../mygo";
+
+export type CredentialStorageMode = "local" | "keychain";
 
 /**
  * The Go side (`RedisService`) is the only source of truth. This module is the
@@ -82,6 +85,20 @@ export function errorMessage(error: unknown): string {
 
 export const redis = {
   listConnections: (): Promise<Connection[]> => svc().listConnections(),
+  getCredentialStorage: (): Promise<CredentialStorageStatus> => {
+    const s = svc() as Partial<Service>;
+    if (typeof s.getCredentialStorage !== "function" || (s === bindings.RedisService && !isMyGo())) {
+      return Promise.resolve({ mode: "local", keychainPending: 0 });
+    }
+    return s.getCredentialStorage();
+  },
+  setCredentialStorage: (mode: CredentialStorageMode): Promise<CredentialStorageStatus> => {
+    const s = svc() as Partial<Service>;
+    if (typeof s.setCredentialStorage !== "function" || (s === bindings.RedisService && !isMyGo())) {
+      return Promise.reject(new Error("密码存储切换仅在 Redis Manager 桌面应用中可用。"));
+    }
+    return s.setCredentialStorage(mode);
+  },
   saveConnection: (input: Connection, password: string): Promise<void> => svc().saveConnection(input, password),
   deleteConnection: (id: string): Promise<void> => svc().deleteConnection(id),
   testConnection: (input: Connection, password: string): Promise<ConnectionTest> => svc().testConnection(input, password),
@@ -96,4 +113,14 @@ export const redis = {
   execCLI: (id: string, db: number, line: string, readOnly: boolean): Promise<CLIResult> => svc().execCLI(id, db, line, readOnly),
 };
 
-export type { AppInfo, CLIResult, Connection, ConnectionTest, KeyPage, MonitorSnapshot, OverviewSnapshot, RedisValue };
+export type {
+  AppInfo,
+  CLIResult,
+  Connection,
+  ConnectionTest,
+  CredentialStorageStatus,
+  KeyPage,
+  MonitorSnapshot,
+  OverviewSnapshot,
+  RedisValue,
+};

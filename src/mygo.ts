@@ -60,6 +60,15 @@ export interface ConnectionTest {
   dbCount: number;
 }
 
+/**
+ * CredentialStorageStatus describes the active credential backend and whether
+ * any legacy connection passwords still reside in the OS keychain.
+ */
+export interface CredentialStorageStatus {
+  mode: string;
+  keychainPending: number;
+}
+
 export interface KeyMeta {
   key: string;
   type: string;
@@ -204,6 +213,10 @@ export const RedisService = {
   execCLI(connID: string, db: number, line: string, readOnly: boolean): Promise<CLIResult> {
     return call("RedisService.ExecCLI", connID, db, line, readOnly);
   },
+  /** GetCredentialStorage returns the active password storage mode. */
+  getCredentialStorage(): Promise<CredentialStorageStatus> {
+    return call("RedisService.GetCredentialStorage");
+  },
   /** GetMetrics returns a lightweight INFO snapshot for the status bar. */
   getMetrics(connID: string, db: number): Promise<ServerMetrics> {
     return call("RedisService.GetMetrics", connID, db);
@@ -229,9 +242,8 @@ export const RedisService = {
     return call("RedisService.ListConnections");
   },
   /**
-   * SaveConnection writes a connection definition and its password to a local
-   * file with owner-only permissions. A later keychain integration can replace
-   * this storage without changing the frontend contract.
+   * SaveConnection writes a connection definition and stores its password in the
+   * configured credential backend (local AES-256-GCM file or OS keychain).
    */
   saveConnection(input: Connection, password: string): Promise<void> {
     return call("RedisService.SaveConnection", input, password);
@@ -239,6 +251,13 @@ export const RedisService = {
   /** ScanKeys reads one Redis SCAN page and enriches every key with metadata. */
   scanKeys(connID: string, db: number, pattern: string, cursor: number, count: number): Promise<KeyPage> {
     return call("RedisService.ScanKeys", connID, db, pattern, cursor, count);
+  },
+  /**
+   * SetCredentialStorage switches between local AES-256-GCM storage and the OS
+   * credential store, migrating saved connection passwords accordingly.
+   */
+  setCredentialStorage(mode: string): Promise<CredentialStorageStatus> {
+    return call("RedisService.SetCredentialStorage", mode);
   },
   /** TestConnection pings a Redis server and returns a small INFO summary. */
   testConnection(input: Connection, password: string): Promise<ConnectionTest> {

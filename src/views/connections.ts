@@ -5,8 +5,12 @@ import { currentConnection, currentDb, type ViewState } from "../core/store";
 import { btn, emptyState, kvList, pane } from "../ui/kit";
 
 export function connectionsView(s: ViewState): string {
+  const passwordDesc =
+    s.credentialStorage === "keychain"
+      ? "新建连接填写主机、端口与认证信息，密码会存入系统钥匙串。"
+      : "新建连接填写主机、端口与认证信息，密码会以 AES-256-GCM 加密保存在本地。";
   if (!s.connections.length) {
-    return emptyState("还没有保存的连接", "新建连接填写主机、端口与认证信息，密码会存进系统凭据存储。", { label: "新建连接", action: "new-connection" });
+    return emptyState("还没有保存的连接", passwordDesc, { label: "新建连接", action: "new-connection" });
   }
   const active = currentConnection();
   // Connection management uses the same grammar as the key list: one ruled row
@@ -49,7 +53,13 @@ export function connectionsView(s: ViewState): string {
         title: "凭据与存储",
         body: kvList([
           { k: "配置文件", v: "~/Library/Application Support/Redis Manager/connections.json" },
-          { k: "密码", v: "MyGo 系统凭据存储（不可用时回退到受限文件）" },
+          {
+            k: "密码",
+            v:
+              s.credentialStorage === "keychain"
+                ? "系统钥匙串（可在设置中切换为本地加密存储）"
+                : "本地 AES-256-GCM 加密存储（0600 权限密钥文件，可在设置中切换）",
+          },
           { k: "传输", v: "go-redis v9 · Standalone / Sentinel / Cluster" },
         ]),
       })}

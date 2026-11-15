@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import type { Connection, KeyPage, OverviewSnapshot, RedisValue, Service } from "../src/core/api";
 import type { KeyTarget } from "../src/core/store";
 
-type MockRedis = Pick<Service, "listConnections" | "saveConnection" | "getOverview" | "scanKeys" | "getValue" | "hashSet" | "deleteKey">;
+type MockRedis = Pick<Service, "listConnections" | "saveConnection" | "getOverview" | "scanKeys" | "getValue" | "hashSet" | "deleteKey"> &
+  Partial<Pick<Service, "getCredentialStorage" | "setCredentialStorage">>;
 const connections: Connection[] = ["a", "b"].map((id) => ({
   id, name: id, group: "Local", host: "localhost", port: 6379, db: 0, mode: "standalone", tls: false, readOnly: false,
 }));
@@ -28,6 +29,8 @@ const defaults = (): MockRedis => ({
   getValue: async (id, db, key) => value(key, `${id}/${db}`),
   hashSet: async () => {},
   deleteKey: async () => {},
+  getCredentialStorage: undefined,
+  setCredentialStorage: undefined,
 });
 const service = defaults();
 
@@ -422,6 +425,27 @@ await test("saving from the current editor still closes it and selects the saved
   assert.equal(await store.saveConnection(connections[1]!, ""), true);
   assert.equal(state.connectionEditor, null);
   assert.equal(state.connId, "b");
+});
+
+await test("credential storage mode loads, switches, and keeps state on failure", async () => {
+  service.getCredentialStorage = async () => ({ mode: "local", keychainPending: 2 });
+  await store.loadCredentialStorage();
+  assert.equal(state.credentialStorage, "local");
+  assert.equal(state.credentialKeychainPending, 2);
+
+  service.setCredentialStorage = async (mode) => ({ mode, keychainPending: 0 });
+  assert.equal(await store.setCredentialStorage("keychain"), true);
+  assert.equal(state.credentialStorage, "keychain");
+  assert.equal(state.credentialKeychainPending, 0);
+  assert.equal(state.credentialStorageSaving, false);
+
+  service.setCredentialStorage = async () => {
+    throw new Error("keychain denied");
+  };
+  assert.equal(await store.setCredentialStorage("local"), false);
+  assert.equal(state.credentialStorage, "keychain");
+  assert.equal(state.credentialStorageSaving, false);
+  assert.equal(state.toasts.some((t) => t.title === "切换密码存储失败"), true);
 });
 
 console.log(`Async state regressions: ${passed} passed, ${failed} failed.`);

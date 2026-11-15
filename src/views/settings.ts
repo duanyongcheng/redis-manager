@@ -19,6 +19,16 @@ export function settingsView(s: ViewState): string {
       : info?.updatesEnabled
         ? "发现新版本时会显示更新提示，可选择安装、稍后提醒或跳过。"
         : "此构建或安装位置暂不支持自动更新。");
+  const credentialHint =
+    s.credentialStorage === "keychain"
+      ? "使用系统钥匙串保存密码（macOS 无开发者证书签名时，每次应用更新后会重新请求授权）"
+      : s.credentialKeychainPending > 0
+        ? `使用本机 0600 密钥文件做 AES-256-GCM 加密；仍有 ${s.credentialKeychainPending} 个旧连接的密码保留在系统钥匙串，可在编辑连接中重输密码直接落盘`
+        : "使用本机 0600 密钥文件做 AES-256-GCM 加密，应用更新后不再弹系统钥匙串授权";
+  const configHint =
+    s.credentialStorage === "keychain"
+      ? "非敏感连接字段保存在应用支持目录（0600 权限）"
+      : "连接字段与 AES-256-GCM 密文保存在应用支持目录（0600 权限）";
 
   return `<div class="settings">
     <div class="settings-stack">
@@ -59,9 +69,14 @@ export function settingsView(s: ViewState): string {
       ${pane({
         title: "凭据与安全",
         cls: "settings-security",
-        body: `<div class="setting-row"><div><b>密码存储</b><span class="hint">MyGo 系统凭据存储，不可用时回退到 0600 权限的配置文件</span></div><span class="badge ok">${icon("lock", 10)} 系统凭据</span></div>
+        body: `<div class="setting-row"><div><b>密码存储</b><span class="hint" data-credential-hint>${esc(credentialHint)}</span></div>
+            <select class="select" data-setting="credentialStorage" aria-label="密码存储" ${s.credentialStorageSaving ? "disabled" : ""}>
+              <option value="local" ${s.credentialStorage === "local" ? "selected" : ""}>本地加密存储</option>
+              <option value="keychain" ${s.credentialStorage === "keychain" ? "selected" : ""}>系统钥匙串</option>
+            </select>
+          </div>
           <div class="setting-row"><div><b>危险命令保护</b><span class="hint">KEYS / FLUSHALL 等会拦截并要求改用安全替代</span></div><span class="badge acc">已启用</span></div>
-          <div class="setting-row"><div><b>连接配置文件</b><span class="hint">非敏感字段保存在应用支持目录</span></div><span class="mono faint" style="font-size:11px">connections.json</span></div>`,
+          <div class="setting-row"><div><b>连接配置文件</b><span class="hint">${esc(configHint)}</span></div><span class="mono faint" style="font-size:11px">connections.json</span></div>`,
       })}
       ${pane({
         title: "快捷键",

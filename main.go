@@ -49,7 +49,9 @@ type Connection struct {
 
 type connectionRecord struct {
 	Connection
-	Password string `json:"password,omitempty"`
+	Password          string `json:"password,omitempty"`
+	EncryptedPassword string `json:"encryptedPassword,omitempty"`
+	CredentialStore   string `json:"credentialStore,omitempty"`
 }
 
 // ConnectionTest is returned by TestConnection before a connection is saved.
@@ -190,17 +192,27 @@ type MonitorSnapshot struct {
 
 // RedisService owns saved connections and lazily creates Redis clients.
 type RedisService struct {
-	mu        sync.Mutex
-	records   map[string]connectionRecord
-	clients   map[string]redis.UniversalClient
-	clientDBs map[string]int
+	mu                sync.Mutex
+	loaded            bool
+	credentialStorage string
+	localKey          []byte
+	records           map[string]connectionRecord
+	passwords         map[string]string
+	clients           map[string]redis.UniversalClient
+	clientDBs         map[string]int
+	configDirFn       func() (string, error)
+	secrets           secretStore
 }
 
 func NewRedisService() *RedisService {
 	return &RedisService{
-		records:   make(map[string]connectionRecord),
-		clients:   make(map[string]redis.UniversalClient),
-		clientDBs: make(map[string]int),
+		credentialStorage: CredentialStorageLocal,
+		records:           make(map[string]connectionRecord),
+		passwords:         make(map[string]string),
+		clients:           make(map[string]redis.UniversalClient),
+		clientDBs:         make(map[string]int),
+		configDirFn:       defaultConfigDir,
+		secrets:           mygoSecretStore{},
 	}
 }
 
@@ -224,9 +236,8 @@ func (s *RedisService) ListConnections() ([]Connection, error) {
 	return items, nil
 }
 
-// SaveConnection writes a connection definition and its password to a local
-// file with owner-only permissions. A later keychain integration can replace
-// this storage without changing the frontend contract.
+// SaveConnection writes a connection definition and stores its password in the
+// configured credential backend (local AES-256-GCM file or OS keychain).
 func (s *RedisService) SaveConnection(input Connection, password string) error {
 	input = normalizeConnection(input)
 	if input.Name == "" {
@@ -238,28 +249,74 @@ func (s *RedisService) SaveConnection(input Connection, password string) error {
 	if err := s.ensureLoaded(); err != nil {
 		return err
 	}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if password == "" {
-		if existing, ok := s.records[input.ID]; ok {
-			password = existing.Password
+	mode := s.credentialStorage
+	existing, hasExisting := s.records[input.ID]
+	s.mu.Unlock()
+
+	var deleteKeychainAfterSave bool
+	var storedInKeychain bool
+	if password != "" && mode == CredentialStorageKeychain {
+		if err := s.secretBackend().Set(passwordSecretKey(input.ID), []byte(password)); err == nil {
+			storedInKeychain = true
 		}
 	}
-	filePassword := ""
-	if password != "" {
-		if err := savePassword(input.ID, password); err != nil {
-			// Keep the app usable when a credential store is unavailable. The
-			// fallback file is written with owner-only permissions.
-			filePassword = password
+
+	s.mu.Lock()
+	var record connectionRecord
+	record.Connection = input
+
+	switch {
+	case password != "":
+		s.passwords[input.ID] = password
+		if storedInKeychain {
+			record.CredentialStore = credentialStoreKeychain
+		} else {
+			enc, err := s.encryptPasswordLocked(password)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			record.EncryptedPassword = enc
+			record.CredentialStore = credentialStoreLocal
+			if hasExisting && (existing.CredentialStore == credentialStoreKeychain || existing.CredentialStore == "") {
+				deleteKeychainAfterSave = true
+			}
 		}
+	case hasExisting:
+		record.Password = existing.Password
+		record.EncryptedPassword = existing.EncryptedPassword
+		record.CredentialStore = existing.CredentialStore
+		if s.credentialStorage == CredentialStorageLocal && record.Password != "" {
+			enc, err := s.encryptPasswordLocked(record.Password)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			s.passwords[input.ID] = record.Password
+			record.EncryptedPassword = enc
+			record.Password = ""
+			record.CredentialStore = credentialStoreLocal
+		}
+	default:
+		s.passwords[input.ID] = ""
+		record.CredentialStore = credentialStoreNone
 	}
-	s.records[input.ID] = connectionRecord{Connection: input, Password: filePassword}
+
+	s.records[input.ID] = record
 	if client, ok := s.clients[input.ID]; ok {
 		_ = client.Close()
 		delete(s.clients, input.ID)
 		delete(s.clientDBs, input.ID)
 	}
-	return s.saveLocked()
+	err := s.saveLocked()
+	s.mu.Unlock()
+
+	if err == nil && deleteKeychainAfterSave {
+		_ = s.secretBackend().Delete(passwordSecretKey(input.ID))
+	}
+	return err
 }
 
 // DeleteConnection removes a saved connection and closes its cached client.
@@ -268,15 +325,21 @@ func (s *RedisService) DeleteConnection(id string) error {
 		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	existing, hasExisting := s.records[id]
 	if client, ok := s.clients[id]; ok {
 		_ = client.Close()
 		delete(s.clients, id)
 		delete(s.clientDBs, id)
 	}
-	_ = mygo.Secrets.Service(appName).Delete(passwordSecretKey(id))
+	delete(s.passwords, id)
 	delete(s.records, id)
-	return s.saveLocked()
+	err := s.saveLocked()
+	s.mu.Unlock()
+
+	if hasExisting && (existing.CredentialStore == credentialStoreKeychain || existing.CredentialStore == "") {
+		_ = s.secretBackend().Delete(passwordSecretKey(id))
+	}
+	return err
 }
 
 // TestConnection pings a Redis server and returns a small INFO summary.
@@ -345,8 +408,11 @@ func (s *RedisService) CheckConnection(connID string) (ConnectionTest, error) {
 		err := fmt.Errorf("connection %q not found", connID)
 		return ConnectionTest{Status: "error", Message: err.Error()}, err
 	}
-	record = hydratePassword(record)
-	return s.TestConnection(record.Connection, record.Password)
+	password, err := s.resolvePassword(connID)
+	if err != nil {
+		return ConnectionTest{Status: "error", Message: err.Error()}, err
+	}
+	return s.TestConnection(record.Connection, password)
 }
 
 // ScanKeys reads one Redis SCAN page and enriches every key with metadata.
@@ -653,11 +719,15 @@ func normalizeConnection(input Connection) Connection {
 	return input
 }
 
-func (s *RedisService) ensureLoaded() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *RedisService) ensureMapsLocked() {
+	if s.credentialStorage == "" {
+		s.credentialStorage = CredentialStorageLocal
+	}
 	if s.records == nil {
 		s.records = make(map[string]connectionRecord)
+	}
+	if s.passwords == nil {
+		s.passwords = make(map[string]string)
 	}
 	if s.clients == nil {
 		s.clients = make(map[string]redis.UniversalClient)
@@ -665,15 +735,25 @@ func (s *RedisService) ensureLoaded() error {
 	if s.clientDBs == nil {
 		s.clientDBs = make(map[string]int)
 	}
-	if len(s.records) > 0 {
+}
+
+func (s *RedisService) ensureLoaded() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureMapsLocked()
+	if s.loaded {
 		return nil
 	}
-	path, err := configFilePath()
+	if err := s.loadPreferencesLocked(); err != nil {
+		return err
+	}
+	path, err := s.connectionsFilePath()
 	if err != nil {
 		return err
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		s.loaded = true
 		return nil
 	}
 	if err != nil {
@@ -683,19 +763,35 @@ func (s *RedisService) ensureLoaded() error {
 	if err := json.Unmarshal(data, &records); err != nil {
 		return fmt.Errorf("decode connections: %w", err)
 	}
+	upgraded := false
 	for _, record := range records {
 		record.Connection = normalizeConnection(record.Connection)
+		if record.Password != "" {
+			s.passwords[record.ID] = record.Password
+			if s.credentialStorage == CredentialStorageLocal {
+				if enc, encErr := s.encryptPasswordLocked(record.Password); encErr == nil {
+					record.EncryptedPassword = enc
+					record.Password = ""
+					record.CredentialStore = credentialStoreLocal
+					upgraded = true
+				}
+			}
+		} else if record.EncryptedPassword != "" && record.CredentialStore == "" {
+			record.CredentialStore = credentialStoreLocal
+			upgraded = true
+		}
 		s.records[record.ID] = record
+	}
+	s.loaded = true
+	if upgraded {
+		_ = s.saveLocked()
 	}
 	return nil
 }
 
 func (s *RedisService) saveLocked() error {
-	path, err := configFilePath()
+	path, err := s.connectionsFilePath()
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	records := make([]connectionRecord, 0, len(s.records))
@@ -707,38 +803,19 @@ func (s *RedisService) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeAtomicFile(path, data, 0o600)
 }
 
-func configFilePath() (string, error) {
-	dir, err := os.UserConfigDir()
+func (s *RedisService) connectionsFilePath() (string, error) {
+	dir, err := s.configDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, appName, "connections.json"), nil
+	return filepath.Join(dir, "connections.json"), nil
 }
 
 func passwordSecretKey(id string) string {
 	return "connection/" + id
-}
-
-func savePassword(id, password string) error {
-	return mygo.Secrets.Service(appName).Set(passwordSecretKey(id), []byte(password))
-}
-
-func hydratePassword(record connectionRecord) connectionRecord {
-	if record.Password != "" {
-		return record
-	}
-	password, err := mygo.Secrets.Service(appName).Get(passwordSecretKey(record.ID))
-	if err == nil {
-		record.Password = string(password)
-	}
-	return record
 }
 
 func (s *RedisService) clientFor(id string, db int) (redis.UniversalClient, error) {
@@ -746,14 +823,32 @@ func (s *RedisService) clientFor(id string, db int) (redis.UniversalClient, erro
 		return nil, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.clients == nil {
-		s.clients = make(map[string]redis.UniversalClient)
-	}
-	if s.clientDBs == nil {
-		s.clientDBs = make(map[string]int)
-	}
+	s.ensureMapsLocked()
 	record, ok := s.records[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("connection %q not found", id)
+	}
+	targetDB := db
+	if targetDB < 0 {
+		targetDB = record.DB
+	}
+	if client, ok := s.clients[id]; ok {
+		if currentDB, hasDB := s.clientDBs[id]; hasDB && currentDB == targetDB {
+			s.mu.Unlock()
+			return client, nil
+		}
+	}
+	s.mu.Unlock()
+
+	password, err := s.resolvePassword(id)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok = s.records[id]
 	if !ok {
 		return nil, fmt.Errorf("connection %q not found", id)
 	}
@@ -768,7 +863,7 @@ func (s *RedisService) clientFor(id string, db int) (redis.UniversalClient, erro
 		delete(s.clients, id)
 		delete(s.clientDBs, id)
 	}
-	record = hydratePassword(record)
+	record.Password = password
 	record.DB = db
 	client, err := newRedisClient(record)
 	if err != nil {

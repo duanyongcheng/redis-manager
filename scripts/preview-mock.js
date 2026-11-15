@@ -132,8 +132,14 @@
     }
   };
 
+  let credentialMode = "local";
   window.RedisService = {
     listConnections: async () => conns,
+    getCredentialStorage: async () => ({ mode: credentialMode, keychainPending: 0 }),
+    setCredentialStorage: async (mode) => {
+      credentialMode = mode === "keychain" ? "keychain" : "local";
+      return { mode: credentialMode, keychainPending: 0 };
+    },
     saveConnection: async () => {},
     deleteConnection: async () => {},
     testConnection: async () => ({ status: "ok", message: "", version: "7.2.4", mode: "standalone", latencyMs: 0.8, dbCount: 16 }),

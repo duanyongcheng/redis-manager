@@ -327,6 +327,24 @@ try {
   // Application metadata and update dispatch do not depend on a Redis key.
   await evaluate("document.querySelector('[data-nav=settings]').click()");
   await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]'))"), "update settings");
+  assert.equal(await evaluate("document.querySelector('[data-setting=credentialStorage]').value"), "local", "default credential storage mode is local");
+  assert.ok((await evaluate("document.querySelector('[data-credential-hint]').textContent")).includes("AES-256-GCM"));
+  await evaluate(`{
+    window.RedisService.setCredentialStorage = async (mode) => ({ mode, keychainPending: 0 });
+    const sel = document.querySelector('[data-setting=credentialStorage]');
+    sel.value = 'keychain';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }`);
+  await until(() => evaluate("window.__RM_STATE__.credentialStorage === 'keychain' && !window.__RM_STATE__.credentialStorageSaving"), "switch credential storage to keychain");
+  assert.equal(await evaluate("document.querySelector('[data-setting=credentialStorage]').value"), "keychain");
+  assert.ok((await evaluate("document.querySelector('[data-credential-hint]').textContent")).includes("系统钥匙串"));
+  await evaluate(`{
+    const sel = document.querySelector('[data-setting=credentialStorage]');
+    sel.value = 'local';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }`);
+  await until(() => evaluate("window.__RM_STATE__.credentialStorage === 'local' && !window.__RM_STATE__.credentialStorageSaving"), "switch credential storage back to local");
+  assert.equal(await evaluate("document.querySelector('[data-setting=credentialStorage]').value"), "local");
   assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-app-version]'), el => el.textContent)"), ["1.7.8", "1.7.8"], "header and settings use the running version");
   await evaluate("window.__holdUpdateCheck = true; document.querySelector('[data-action=check-updates]').click(); document.querySelector('[data-action=check-updates]').click()");
   await until(() => evaluate("window.__updateChecks === 1 && document.querySelector('[data-action=check-updates]').disabled"), "one pending update dispatch");
