@@ -31,7 +31,15 @@ await cp(site, out, { recursive: true });
 
 await mkdir(join(out, "screenshots"), { recursive: true });
 for (const name of screenshots) {
-  await copyFile(join(root, "docs", "screenshots", name), join(out, "screenshots", name));
+  const source = join(root, "docs", "screenshots", name);
+  try {
+    await copyFile(source, join(out, "screenshots", name));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`Missing required screenshot: docs/screenshots/${name}`);
+    }
+    throw error;
+  }
 }
 
 await mkdir(join(out, "assets"), { recursive: true });
