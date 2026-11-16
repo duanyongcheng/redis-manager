@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN" data-scheme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#fbfbfc" />
+    <meta name="robots" content="noindex" />
+    <title>页面不存在 — Redis Manager</title>
+    <script>
+      try {
+        if (localStorage.getItem("rm-site-scheme") === "dark") {
+          document.documentElement.dataset.scheme = "dark";
+        }
+      } catch {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="shell topbar-inner topbar-inner-simple">
+        <a class="brand" href="./" aria-label="Redis Manager 首页">
+          <img class="brand-icon" src="./assets/icon.png" alt="" width="22" height="22" />
+          <span class="brand-name">Redis Manager</span>
+        </a>
+        <div class="topbar-actions">
+          <a class="btn btn-primary btn-compact" href="./">返回首页</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="notfound shell">
+      <div class="notfound-inner">
+        <h1 class="notfound-code">404</h1>
+        <p class="notfound-title">页面不存在。</p>
+        <p class="lede">这个地址没有对应的页面，可能是链接过期或输入有误。</p>
+        <a class="btn btn-primary" href="./">回到 Redis Manager 首页</a>
+      </div>
+    </main>
+  </body>
+</html>

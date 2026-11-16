@@ -13,6 +13,7 @@
 # 后续 Go / MyGo 工程
 /build/
 /dist/
+/_site/
 /.mygo/
 node_modules/
 *.app
