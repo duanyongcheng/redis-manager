@@ -2,7 +2,7 @@ import { icon } from "../core/icons";
 import { connAddress, esc, modeLabel, ms } from "../core/format";
 import { type Connection } from "../core/api";
 import { currentConnection, currentDb, type ViewState } from "../core/store";
-import { btn, emptyState, kvList, pane } from "../ui/kit";
+import { emptyState, kvList, pane } from "../ui/kit";
 
 export function connectionsView(s: ViewState): string {
   const passwordDesc =
@@ -27,10 +27,11 @@ export function connectionsView(s: ViewState): string {
         <span class="cr-cell mono">${esc(c.version || "—")}</span>
         <span class="cr-cell mono">${c.latencyMs ? ms(c.latencyMs) : "—"}</span>
         <span class="cr-cell mono">${esc(modeLabel(c.mode))}</span>
-        <span class="cr-badges">${c.tls ? `<span class="badge ok">TLS</span>` : ""}${c.username ? `<span class="badge">ACL</span>` : ""}</span>
+        <span class="cr-badges">${c.tls ? `<span class="badge ${c.tlsSkipVerify ? "warn" : "ok"}" title="${c.tlsSkipVerify ? "TLS（跳过证书校验）" : "启用 TLS"}">TLS</span>` : ""}${c.username ? `<span class="badge">ACL</span>` : ""}</span>
         <span class="cr-actions">
           <button class="btn sm ghost" data-connect="${esc(c.id)}" ${selected ? "disabled" : ""}>${icon("plug", 11)} ${selected ? "当前" : "切换"}</button>
           <button class="icon-btn" data-action="test-id" data-id="${esc(c.id)}" title="测试连接" aria-label="测试连接">${icon("zap", 13)}</button>
+          <button class="icon-btn" data-action="clone-connection" data-id="${esc(c.id)}" title="克隆连接" aria-label="克隆连接">${icon("copy", 13)}</button>
           <button class="icon-btn" data-action="edit-connection" data-id="${esc(c.id)}" title="编辑" aria-label="编辑">${icon("edit", 13)}</button>
           <button class="icon-btn danger" data-action="delete-connection" data-id="${esc(c.id)}" title="删除连接" aria-label="删除连接">${icon("trash", 13)}</button>
         </span>
@@ -52,7 +53,7 @@ export function connectionsView(s: ViewState): string {
       ${pane({
         title: "凭据与存储",
         body: kvList([
-          { k: "配置文件", v: "~/Library/Application Support/Redis Manager/connections.json" },
+          { k: "配置文件", v: s.appInfo?.configDir ? `${s.appInfo.configDir}/connections.json` : "应用配置目录/connections.json" },
           {
             k: "密码",
             v:
@@ -109,7 +110,7 @@ export function editorDraft(s: ViewState): EditorDraft {
   const editor = s.connectionEditor;
   const existing = editor?.mode === "edit" ? s.connections.find((c) => c.id === editor.id) : null;
   const base: EditorDraft = existing
-    ? { ...existing, password: "" }
+    ? { ...existing, tlsSkipVerify: Boolean(existing.tlsSkipVerify), password: "" }
     : {
         id: `conn-${Date.now().toString(36)}`,
         name: "",
@@ -119,6 +120,7 @@ export function editorDraft(s: ViewState): EditorDraft {
         db: 0,
         mode: "standalone",
         tls: false,
+        tlsSkipVerify: false,
         readOnly: false,
         username: "",
         seedNodes: "",
@@ -131,10 +133,10 @@ export function editorDraft(s: ViewState): EditorDraft {
 export function connectionDialog(s: ViewState, draft: EditorDraft, testResult: { kind: "ok" | "err" | "info"; text: string } | null): string {
   if (!s.connectionEditor) return "";
   const editing = s.connectionEditor.mode === "edit";
-  const field = (name: keyof EditorDraft, label: string, opts: { type?: string; placeholder?: string; full?: boolean; hint?: string } = {}) =>
+  const field = (name: keyof EditorDraft, label: string, opts: { type?: string; placeholder?: string; full?: boolean; hint?: string; min?: number } = {}) =>
     `<div class="field ${opts.full ? "full" : ""}">
       <label for="cf-${String(name)}">${esc(label)}</label>
-      <input class="input ${opts.type === "number" ? "mono" : ""}" id="cf-${String(name)}" name="${String(name)}" data-field="${String(name)}" type="${opts.type ?? "text"}" value="${esc(draft[name] ?? "")}" placeholder="${esc(opts.placeholder ?? "")}" autocomplete="off" ${opts.type === "number" ? 'min="1"' : ""} />
+      <input class="input ${opts.type === "number" ? "mono" : ""}" id="cf-${String(name)}" name="${String(name)}" data-field="${String(name)}" type="${opts.type ?? "text"}" value="${esc(draft[name] ?? "")}" placeholder="${esc(opts.placeholder ?? "")}" autocomplete="off" ${opts.type === "number" ? `min="${opts.min ?? 1}"` : ""} />
       ${opts.hint ? `<span class="hint">${esc(opts.hint)}</span>` : ""}
     </div>`;
 
@@ -150,8 +152,8 @@ export function connectionDialog(s: ViewState, draft: EditorDraft, testResult: {
           ${field("name", "连接名称", { placeholder: "Prod · Order Svc" })}
           ${field("group", "分组", { placeholder: "Production / Staging / Local" })}
           ${field("host", "主机")}
-          ${field("port", "端口", { type: "number" })}
-          ${field("db", "默认 db", { type: "number" })}
+          ${field("port", "端口", { type: "number", min: 1 })}
+          ${field("db", "默认 db", { type: "number", min: 0 })}
           <div class="field">
             <label for="cf-mode">部署模式</label>
             <select class="select" id="cf-mode" data-field="mode">
@@ -160,7 +162,13 @@ export function connectionDialog(s: ViewState, draft: EditorDraft, testResult: {
           </div>
           ${colorField(draft)}
           <div id="connection-mode-fields" style="display:contents">
-            ${draft.mode === "cluster" ? field("seedNodes", "种子节点", { full: true, placeholder: "10.0.0.1:6379, 10.0.0.2:6379" }) : ""}
+            ${
+              draft.mode === "cluster"
+                ? field("seedNodes", "种子节点", { full: true, placeholder: "10.0.0.1:6379, 10.0.0.2:6379" })
+                : draft.mode === "sentinel"
+                  ? field("seedNodes", "Sentinel 节点列表", { full: true, placeholder: "10.0.0.1:26379, 10.0.0.2:26379（留空则使用上方主机:端口）" })
+                  : ""
+            }
             ${draft.mode === "sentinel" ? field("sentinelMaster", "Sentinel 主库名", { full: true, placeholder: "mymaster" }) : ""}
           </div>
         </div>
@@ -172,13 +180,21 @@ export function connectionDialog(s: ViewState, draft: EditorDraft, testResult: {
         <div class="form-section">加密与偏好</div>
         <div class="field-grid">
           <label class="field toggle-field">
-            <span class="switch ${draft.tls ? "on" : ""}" data-form-toggle="tls" role="switch" aria-checked="${draft.tls}" tabindex="0"></span>
+            <span class="switch ${draft.tls ? "on" : ""}" data-form-toggle="tls" role="switch" aria-checked="${Boolean(draft.tls)}" tabindex="0"></span>
             <span><b>启用 TLS</b><span class="hint">使用系统根证书校验服务端</span></span>
           </label>
           <label class="field toggle-field">
-            <span class="switch ${draft.readOnly ? "on" : ""}" data-form-toggle="readOnly" role="switch" aria-checked="${draft.readOnly}" tabindex="0"></span>
-            <span><b>只读连接</b><span class="hint">拦截 CLI 写命令</span></span>
+            <span class="switch ${draft.readOnly ? "on" : ""}" data-form-toggle="readOnly" role="switch" aria-checked="${Boolean(draft.readOnly)}" tabindex="0"></span>
+            <span><b>只读连接</b><span class="hint">拦截键值修改、删除与 CLI 写命令</span></span>
           </label>
+          ${
+            draft.tls
+              ? `<label class="field toggle-field full">
+            <span class="switch ${draft.tlsSkipVerify ? "on" : ""}" data-form-toggle="tlsSkipVerify" role="switch" aria-checked="${Boolean(draft.tlsSkipVerify)}" tabindex="0"></span>
+            <span><b>跳过证书校验</b><span class="hint">允许连接使用自签名证书的内网 TLS 实例</span></span>
+          </label>`
+              : ""
+          }
         </div>
         <div id="connection-test-result">${testResult ? `<div class="test-result ${testResult.kind}">${esc(testResult.text)}</div>` : ""}</div>
       </form>

@@ -45,11 +45,13 @@ export async function testRefreshState({ evaluate, send, until }) {
       value: input.value, start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection};
   })()`);
   const refresh = () => evaluate("window.__refreshStore.loadOverview()");
-  await evaluate(`import('/src/core/store.ts').then(store => {
+  await evaluate(`import('/src/core/store.ts').then(async store => {
     window.__refreshStore = store;
     window.__refreshServices = {...window.RedisService};
     store.stopPolling();
+    await store.selectConnection('second');
   })`);
+  await until(() => evaluate("window.__RM_STATE__.connId === 'second'"), "writable connection selected");
 
   try {
     await check("palette query and keyboard selection survive polling and notifications", async () => {
@@ -263,6 +265,154 @@ export async function testRefreshState({ evaluate, send, until }) {
       await until(() => evaluate("window.__deleteCalls.length === 1"), "confirmed delete");
       assert.deepEqual(await evaluate("window.__deleteCalls[0]"), await evaluate("window.__confirmedTarget"));
       assert.equal(await evaluate("window.__RM_STATE__.value?.key"), "new:key", "deleting the captured key must not clear a new selection");
+      await evaluate("Object.assign(window.RedisService, window.__refreshServices)");
+    });
+
+    await check("read-only connection disables key deletion, hides Hash editor, and locks CLI write mode", async () => {
+      await evaluate("window.__refreshStore.selectConnection('preview')");
+      await until(() => evaluate("window.__RM_STATE__.connId === 'preview'"), "switch to read-only preview connection");
+      await openPage("browser");
+      await evaluate(`(() => {
+        const roHash = {key:'ro:hash', type:'hash', ttlMs:60000, sizeBytes:24, encoding:'hashtable', hash:{existing:'value'}};
+        window.__refreshStore.patch({selectedKey:roHash.key, value:roHash, valueLoading:false, valueError:''});
+      })()`);
+      await until(() => evaluate("document.querySelector('.value-head .key-name')?.textContent === 'ro:hash'"), "read-only Hash rendered");
+      assert.equal(await evaluate("document.querySelector('[data-action=\"delete-key\"]')?.disabled"), true, "delete-key button is disabled on read-only connection");
+      assert.equal(await evaluate("document.querySelector('#hash-form')"), null, "Hash write form is hidden on read-only connection");
+      assert.equal(await evaluate("document.querySelector('[data-action=\"delete-hash-field\"]')"), null, "Hash field delete button is hidden on read-only connection");
+      assert.equal(await evaluate("document.querySelector('[data-action=\"edit-ttl\"]')"), null, "TTL edit trigger is hidden on read-only connection");
+      assert.equal(await evaluate("document.querySelector('[data-action=\"new-key\"]')"), null, "New Key button is hidden on read-only connection");
+
+      await openPage("cli");
+      await until(() => evaluate("Boolean(document.querySelector('[data-cli-mode=\"write\"]'))"), "read-only CLI mode bar");
+      assert.equal(await evaluate("document.querySelector('[data-cli-mode=\"write\"]').disabled"), true, "CLI writable mode button is disabled on read-only connection");
+      assert.equal(await evaluate("document.querySelector('[data-cli-mode=\"readonly\"]').classList.contains('active')"), true, "CLI read-only mode stays active");
+      await evaluate("document.querySelector('[data-cli-mode=\"write\"]').click(); window.__refreshStore.setCliReadOnly(false)");
+      assert.equal(await evaluate("window.__refreshStore.activeCliSession()?.readOnly"), true, "read-only connection blocks switching CLI session to writable");
+
+      await evaluate("window.__refreshStore.selectConnection('second')");
+      await until(() => evaluate("window.__RM_STATE__.connId === 'second'"), "restore writable connection");
+    });
+
+    await check("DOM Range text selection in value viewer and CLI log survives background polling", async () => {
+      await evaluate("Object.assign(window.RedisService, window.__refreshServices)");
+      try {
+        await openPage("browser");
+        await evaluate("window.__refreshStore.openKey('preview:html')");
+        await until(() => evaluate("window.__RM_STATE__.value?.key === 'preview:html' && Boolean(document.querySelector('.value-body [data-view=raw]'))"), "raw value rendered for selection");
+        await refresh();
+        const browserSelected = await evaluate(`(() => {
+          const pre = document.querySelector('.value-body [data-view=raw]');
+          const textNode = pre.firstChild;
+          const range = document.createRange();
+          range.setStart(textNode, 0);
+          range.setEnd(textNode, Math.min(12, textNode.textContent.length));
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return sel.toString();
+        })()`);
+        assert.ok(browserSelected.length > 0, "browser value Range selection created");
+        await refresh();
+        await evaluate("window.__refreshStore.toast('info', 'browser selection toast')");
+        const afterBrowserPoll = await evaluate(`(() => {
+          const sel = window.getSelection();
+          const body = document.querySelector('.value-body');
+          return {
+            collapsed: sel.isCollapsed,
+            text: sel.toString(),
+            attached: sel.rangeCount > 0 && Boolean(body?.contains(sel.getRangeAt(0).commonAncestorContainer)),
+          };
+        })()`);
+        assert.deepEqual(afterBrowserPoll, { collapsed: false, text: browserSelected, attached: true }, "value-body text selection survives metric polling and toast renders");
+
+        await openPage("cli");
+        await evaluate("window.__refreshStore.runCli('PING')");
+        await until(() => evaluate("Boolean(document.querySelector('#cli-log .cli-line'))"), "CLI output line rendered for selection");
+        await refresh();
+        const cliSelected = await evaluate(`(() => {
+          const line = document.querySelector('#cli-log .cli-line');
+          const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+          const textNode = walker.nextNode();
+          const range = document.createRange();
+          range.setStart(textNode, 0);
+          range.setEnd(textNode, Math.min(10, textNode.textContent.length));
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return sel.toString();
+        })()`);
+        assert.ok(cliSelected.length > 0, "CLI log Range selection created");
+        await refresh();
+        await evaluate("window.__refreshStore.toast('info', 'cli selection toast')");
+        const afterCliPoll = await evaluate(`(() => {
+          const sel = window.getSelection();
+          const log = document.querySelector('#cli-log');
+          return {
+            collapsed: sel.isCollapsed,
+            text: sel.toString(),
+            attached: sel.rangeCount > 0 && Boolean(log?.contains(sel.getRangeAt(0).commonAncestorContainer)),
+          };
+        })()`);
+        assert.deepEqual(afterCliPoll, { collapsed: false, text: cliSelected, attached: true }, "cli-log text selection survives metric polling and toast renders");
+      } finally {
+        await evaluate("window.getSelection()?.removeAllRanges()");
+      }
+    });
+
+    await check("keyboard ArrowDown on key list roves focus by a single step", async () => {
+      await evaluate("Object.assign(window.RedisService, window.__refreshServices)");
+      await openPage("browser");
+      await evaluate("window.__refreshStore.patch({keyPattern: '*', keyQuery: '', keyType: 'all'}); window.__refreshStore.scanKeys({reset: true})");
+      await until(() => evaluate("document.querySelectorAll('.key-row').length >= 3 && !window.__RM_STATE__.scanning"), "three key rows rendered");
+      const keysOrder = await evaluate("Array.from(document.querySelectorAll('.key-row'), el => el.dataset.key)");
+      await evaluate(`(() => {
+        const firstRow = document.querySelectorAll('.key-row')[0];
+        firstRow.click();
+        firstRow.focus();
+      })()`);
+      await until(() => evaluate(`window.__RM_STATE__.value?.key === ${JSON.stringify(keysOrder[0])} && !window.__RM_STATE__.valueLoading && document.activeElement?.dataset.key === ${JSON.stringify(keysOrder[0])}`), "first key focused and loaded");
+
+      await send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+      assert.equal(await evaluate("document.activeElement?.dataset.key"), keysOrder[1], "single ArrowDown moves focus by exactly 1 row");
+      assert.equal(await evaluate("document.querySelector('.key-row.active')?.dataset.key"), keysOrder[1], "active key-row moves by 1 row");
+      assert.equal(await evaluate("window.__RM_STATE__.selectedKey"), keysOrder[1], "selectedKey updates to second row");
+
+      await until(() => evaluate(`window.__RM_STATE__.value?.key === ${JSON.stringify(keysOrder[1])} && !window.__RM_STATE__.valueLoading`), "debounced value load completes");
+      assert.equal(await evaluate("document.activeElement?.dataset.key"), keysOrder[1], "key-row focus survives debounced value re-render");
+
+      await send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+      assert.equal(await evaluate("document.activeElement?.dataset.key"), keysOrder[2], "subsequent ArrowDown advances by 1 more row");
+    });
+
+    await check("connection editor exposes Sentinel seedNodes + master and TLS skip-verify toggle", async () => {
+      await openPage("connections");
+      await evaluate("document.querySelector('[data-action=new-connection]').click()");
+      await until(() => evaluate("Boolean(document.querySelector('#cf-name'))"), "new connection editor");
+      assert.equal(await evaluate("document.querySelector('#cf-seedNodes')"), null, "standalone mode hides seedNodes");
+      assert.equal(await evaluate("document.querySelector('#cf-sentinelMaster')"), null, "standalone mode hides sentinelMaster");
+      assert.equal(await evaluate("document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]')"), null, "TLS off hides tlsSkipVerify");
+
+      await evaluate("const mode = document.querySelector('#cf-mode'); mode.value = 'sentinel'; mode.dispatchEvent(new Event('change', {bubbles:true}))");
+      await until(() => evaluate("Boolean(document.querySelector('#cf-seedNodes')) && Boolean(document.querySelector('#cf-sentinelMaster'))"), "Sentinel exposes both seedNodes and sentinelMaster");
+      await keepInput("#cf-seedNodes", "10.0.0.1:26379, 10.0.0.2:26379");
+      await keepInput("#cf-sentinelMaster", "mymaster-prod");
+
+      await evaluate("document.querySelector('[data-form-toggle=\"tls\"]').click()");
+      await until(() => evaluate("Boolean(document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]'))"), "enabling TLS exposes tlsSkipVerify");
+      assert.equal(await evaluate("document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]').getAttribute('aria-checked')"), "false", "tlsSkipVerify defaults to false");
+      await evaluate("document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]').click()");
+      assert.equal(await evaluate("document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]').getAttribute('aria-checked')"), "true", "tlsSkipVerify toggles on");
+      assert.equal(await evaluate("document.querySelector('#cf-seedNodes').value"), "10.0.0.1:26379, 10.0.0.2:26379", "toggling TLS preserves Sentinel seedNodes");
+      assert.equal(await evaluate("document.querySelector('#cf-sentinelMaster').value"), "mymaster-prod", "toggling TLS preserves Sentinel master");
+
+      await evaluate("document.querySelector('[data-form-toggle=\"tls\"]').click()");
+      assert.equal(await evaluate("document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]')"), null, "disabling TLS hides tlsSkipVerify");
+      await evaluate("document.querySelector('[data-form-toggle=\"tls\"]').click()");
+      assert.equal(await evaluate("document.querySelector('[data-form-toggle=\"tlsSkipVerify\"]').getAttribute('aria-checked')"), "false", "re-enabling TLS resets tlsSkipVerify to false");
+      await evaluate("document.querySelector('[data-action=editor-close]').click()");
     });
   } finally {
     await evaluate("window.__refreshStore.stopPolling(); Object.assign(window.RedisService, window.__refreshServices)");

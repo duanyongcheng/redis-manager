@@ -1,6 +1,6 @@
-import { bytes, duration, esc, ms, num, timeAgo } from "../core/format";
+import { bytes, clock, duration, esc, ms, num, timeAgo } from "../core/format";
 import { lineChart } from "../core/charts";
-import { currentConnection, currentHistory, currentMonitor, currentOverview, type ViewState } from "../core/store";
+import { currentConnection, currentHistory, currentMonitor, currentOverview, sampleNetKbps, type ViewState } from "../core/store";
 import { emptyState, iconBtn, pane, readout } from "../ui/kit";
 
 /**
@@ -8,7 +8,7 @@ import { emptyState, iconBtn, pane, readout } from "../ui/kit";
  * that answer "who is connected" and "what is slow" when something already
  * looks wrong. Readings stay in the same ruled strip as the overview.
  */
-export function monitorView(s: ViewState): string {
+export function monitorView(_s: ViewState): string {
   const conn = currentConnection();
   if (!conn) return emptyState("还没有连接", "监控需要实时的 INFO 采样。", { label: "新建连接", action: "new-connection" });
   const snap = currentMonitor();
@@ -25,12 +25,13 @@ export function monitorView(s: ViewState): string {
 
   // Charts plot measured samples only; there is no truthful way to draw the
   // time before the first sample.
-  const hist2 = hist;
-  const all = hist2;
-  const labels = [0, Math.floor(all.length / 2), all.length - 1].map((i) => (i === all.length - 1 ? "现在" : `-${(all.length - i - 1) * 4}s`));
+  const all = hist.filter((x) => !x.inferred);
+  const pointLabels = all.map((x) => clock(x.at));
+  const xLabels = all.length <= 1 ? [all[0] ? "现在" : ""] : [clock(all[0]!.at), clock(all[Math.floor(all.length / 2)]!.at), "现在"];
+  const lastRate = sampleNetKbps(all[all.length - 1]);
 
   return `<section class="reads" aria-label="监控读数">
-    ${readout({ label: "QPS", en: "ops/s", value: num(Math.round(ov.opsPerSec)), unit: "ops/s", sub: `${hist.length} 个样本 · 4s 间隔` })}
+    ${readout({ label: "QPS", en: "ops/s", value: num(Math.round(ov.opsPerSec)), unit: "ops/s", sub: `${all.length} 个样本 · 4s 间隔` })}
     ${readout({ label: "平均延迟", en: "latency", value: ov.latencyMs.toFixed(2), unit: "ms", sub: "PING 往返" })}
     ${readout({ label: "客户端", en: "clients", value: num(ov.connectedClients), unit: "conns", sub: `阻塞 ${num(Number(ov.info["blocked_clients"] ?? 0))} · 累计 ${num(Number(ov.info["total_connections_received"] ?? 0))}` })}
     ${readout({ label: "内存", en: "used", value: bytes(ov.usedMemoryBytes), unit: ov.maxMemoryBytes ? `/ ${bytes(ov.maxMemoryBytes)}` : "无上限", sub: `碎片率 ${esc(ov.info["mem_fragmentation_ratio"] ?? "—")}` })}
@@ -40,22 +41,29 @@ export function monitorView(s: ViewState): string {
     <div class="pane-grid side" style="padding-top:12px">
       ${pane({
         title: "命令吞吐",
-        meta: `${hist2.length} 个实测样本`,
+        meta: `${all.length} 个实测样本`,
         tools: iconBtn("refresh", "refresh-monitor", "立即采样"),
-        body: lineChart({ series: [{ name: "ops/s", values: hist2.map((x) => x.ops), fill: true }], height: 176, yTicks: 3, xLabels: labels }),
+        body: lineChart({
+          series: [{ name: "ops/s", values: all.map((x) => x.ops), fill: true }],
+          height: 176,
+          yTicks: 3,
+          pointLabels,
+          xLabels,
+        }),
         bodyCls: "flush",
       })}
       ${pane({
         title: "网络吞吐",
-        meta: `in ${bytes(hist[hist.length - 1]?.netIn ?? 0)} / out ${bytes(hist[hist.length - 1]?.netOut ?? 0)}`,
+        meta: `in ${bytes(Math.round(lastRate.inKBps * 1024))}/s · out ${bytes(Math.round(lastRate.outKBps * 1024))}/s`,
         body: lineChart({
           series: [
-            { name: "in KB/s", values: hist2.map((x) => x.netIn / 4 / 1024), fill: true },
-            { name: "out KB/s", values: hist2.map((x) => x.netOut / 4 / 1024), cls: "muted" },
+            { name: "in KB/s", values: all.map((x) => sampleNetKbps(x).inKBps), fill: true },
+            { name: "out KB/s", values: all.map((x) => sampleNetKbps(x).outKBps), cls: "muted" },
           ],
           height: 176,
           yTicks: 3,
-          xLabels: labels,
+          pointLabels,
+          xLabels,
         }),
         bodyCls: "flush",
       })}

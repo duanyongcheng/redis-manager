@@ -9,6 +9,7 @@ export interface AppInfo {
   version: string;
   isDev: boolean;
   updatesEnabled: boolean;
+  configDir?: string;
 }
 
 export interface CLILine {
@@ -44,6 +45,7 @@ export interface Connection {
   mode: string;
   username?: string;
   tls: boolean;
+  tlsSkipVerify?: boolean;
   readOnly: boolean;
   color?: string;
   seedNodes?: string;
@@ -126,6 +128,8 @@ export interface RedisValue {
   ttlMs: number;
   sizeBytes: number;
   encoding: string;
+  totalCount?: number;
+  truncated?: boolean;
   stringValue?: string;
   hash?: Record<string, string>;
   list?: string[];
@@ -201,7 +205,7 @@ export const RedisService = {
   checkConnection(connID: string): Promise<ConnectionTest> {
     return call("RedisService.CheckConnection", connID);
   },
-  /** DeleteConnection removes a saved connection and closes its cached client. */
+  /** DeleteConnection removes a saved connection and closes its cached clients. */
   deleteConnection(id: string): Promise<void> {
     return call("RedisService.DeleteConnection", id);
   },
@@ -229,9 +233,16 @@ export const RedisService = {
   getOverview(connID: string, db: number): Promise<OverviewSnapshot> {
     return call("RedisService.GetOverview", connID, db);
   },
-  /** GetValue reads a key and returns a type-specific value representation. */
+  /**
+   * GetValue reads a key and returns a type-specific value representation with
+   * big-key protection caps.
+   */
   getValue(connID: string, db: number, key: string): Promise<RedisValue> {
     return call("RedisService.GetValue", connID, db, key);
+  },
+  /** HashDelete deletes one field from a hash. */
+  hashDelete(connID: string, db: number, key: string, field: string): Promise<void> {
+    return call("RedisService.HashDelete", connID, db, key, field);
   },
   /** HashSet sets one field in a hash. */
   hashSet(connID: string, db: number, key: string, field: string, value: string): Promise<void> {
@@ -258,6 +269,14 @@ export const RedisService = {
    */
   setCredentialStorage(mode: string): Promise<CredentialStorageStatus> {
     return call("RedisService.SetCredentialStorage", mode);
+  },
+  /** SetString sets a string value while preserving any existing TTL. */
+  setString(connID: string, db: number, key: string, value: string): Promise<void> {
+    return call("RedisService.SetString", connID, db, key, value);
+  },
+  /** SetTTL updates or removes expiration on a key. */
+  setTTL(connID: string, db: number, key: string, ttlSeconds: number): Promise<void> {
+    return call("RedisService.SetTTL", connID, db, key, ttlSeconds);
   },
   /** TestConnection pings a Redis server and returns a small INFO summary. */
   testConnection(input: Connection, password: string): Promise<ConnectionTest> {

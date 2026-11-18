@@ -5,7 +5,7 @@
  */
 (() => {
   window.AppService = {
-    getAppInfo: async () => ({ version: "预览", isDev: true, updatesEnabled: false }),
+    getAppInfo: async () => ({ version: "预览", isDev: true, updatesEnabled: false, configDir: "~/Library/Application Support/Redis Manager" }),
     checkForUpdates: async () => { throw new Error("浏览器预览不支持软件更新。"); },
   };
   const now = Date.now();
@@ -28,6 +28,7 @@
     redis_version: "7.2.4",
     os: "Linux 6.1 aarch64",
     uptime_in_days: "18",
+    uptime_in_seconds: String(18 * 86400 + 13520),
     hz: "10",
     maxmemory_policy: "allkeys-lru",
     mem_fragmentation_ratio: "1.24",
@@ -90,7 +91,7 @@
 
   // One key holds a small HTML document so the preview modes are reachable
   // from the fixture without a live Redis.
-  const htmlPreview = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:14px/1.7 -apple-system,"PingFang SC",sans-serif;padding:24px 28px;color:#1d211c}table{border-collapse:collapse;width:100%}td,th{border:1px solid #c8ccc0;padding:7px 10px;text-align:left;font-size:13px}th{background:#f4f2ec}$</style></head><body><h3 style="margin:0 0 12px">认/申购交易业务申请表</h3><p style="color:#5f6b76;margin:0 0 16px">由上游系统写入 <code>preview:quoted-html</code>，用于验证预览渲染与安全隔离。</p><table><tr><th>字段</th><th>值</th></tr>${Array.from({ length: 22 }, (_, i) => `<tr><td>附加项目 ${i + 1}</td><td>用于滚动位置验证的示例内容</td></tr>`).join("")}</table></body></html>`;
+  const htmlPreview = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:14px/1.7 -apple-system,"PingFang SC",sans-serif;padding:24px 28px;color:#1d211c}table{border-collapse:collapse;width:100%}td,th{border:1px solid #c8ccc0;padding:7px 10px;text-align:left;font-size:13px}th{background:#f4f2ec}</style></head><body><h3 style="margin:0 0 12px">认/申购交易业务申请表</h3><p style="color:#5f6b76;margin:0 0 16px">由上游系统写入 <code>preview:quoted-html</code>，用于验证预览渲染与安全隔离。</p><table><tr><th>字段</th><th>值</th></tr>${Array.from({ length: 22 }, (_, i) => `<tr><td>附加项目 ${i + 1}</td><td>用于滚动位置验证的示例内容</td></tr>`).join("")}</table></body></html>`;
   const markdownPreview = "# 业务说明\n\n**预览示例**\n\n| 项目 | 值 |\n| --- | --- |\n| 产品 | 示例 |";
   function previewStringValue(key) {
     if (key === "leaderboard") return "";
@@ -133,6 +134,15 @@
   };
 
   let credentialMode = "local";
+  const stringOverrides = new Map();
+  const hashOverrides = new Map();
+  const ttlOverrides = new Map();
+  const ensureHash = (key) => {
+    if (!hashOverrides.has(key)) {
+      hashOverrides.set(key, key.startsWith("user:") ? { ...hash } : {});
+    }
+    return hashOverrides.get(key);
+  };
   window.RedisService = {
     listConnections: async () => conns,
     getCredentialStorage: async () => ({ mode: credentialMode, keychainPending: 0 }),
@@ -140,10 +150,19 @@
       credentialMode = mode === "keychain" ? "keychain" : "local";
       return { mode: credentialMode, keychainPending: 0 };
     },
-    saveConnection: async () => {},
-    deleteConnection: async () => {},
+    saveConnection: async (input) => {
+      if (!input || !input.id) return;
+      const idx = conns.findIndex((c) => c.id === input.id);
+      if (idx >= 0) conns[idx] = { ...conns[idx], ...input };
+      else conns.push({ ...input });
+    },
+    deleteConnection: async (id) => {
+      const idx = conns.findIndex((c) => c.id === id);
+      if (idx >= 0) conns.splice(idx, 1);
+    },
     testConnection: async () => ({ status: "ok", message: "", version: "7.2.4", mode: "standalone", latencyMs: 0.8, dbCount: 16 }),
     checkConnection: async () => ({ status: "ok", message: "", version: "7.2.4", mode: "standalone", latencyMs: 0.8, dbCount: 16 }),
+    getMetrics: async () => ({ opsPerSec: 12442, connectedClients: 318, usedMemoryBytes: 3.42 * 1024 ** 3, keyCount: 74697, redisVersion: "7.2.4" }),
     getOverview: async () => overview(),
     getMonitorSnapshot: async () => ({
       overview: overview(),
@@ -168,15 +187,70 @@
       const list = pattern && pattern !== "*" ? keyMeta.filter((k) => k.key.startsWith(pattern.replace(/\*$/, ""))) : keyMeta;
       return { keys: list, cursor: 10240, done: true };
     },
-    getValue: async (_id, _db, key) => ({
-      key, type: key.startsWith("user:") ? "hash" : key === "leaderboard" ? "zset" : "string",
-      ttlMs: 28800_000, sizeBytes: 486, encoding: "listpack",
-      stringValue: previewStringValue(key),
-      hash: key.startsWith("user:") ? hash : undefined,
-      zset: key === "leaderboard" ? [{ member: "user:1002", score: 9840 }, { member: "user:1044", score: 9112 }, { member: "user:1013", score: 8770 }] : undefined,
-    }),
-    deleteKey: async () => {},
-    hashSet: async () => {},
+    getValue: async (_id, _db, key) => {
+      const meta = keyMeta.find((k) => k.key === key);
+      const isHash = hashOverrides.has(key) || (meta ? meta.type === "hash" : key.startsWith("user:"));
+      const type = isHash ? "hash" : key === "leaderboard" ? "zset" : "string";
+      const ttlMs = ttlOverrides.has(key) ? ttlOverrides.get(key) : 28800_000;
+      const strVal = stringOverrides.has(key) ? stringOverrides.get(key) : previewStringValue(key);
+      const hashVal = isHash ? { ...(hashOverrides.get(key) ?? hash) } : undefined;
+      const sizeBytes = type === "string" ? (stringOverrides.has(key) ? new TextEncoder().encode(strVal).length : 486) : (meta?.sizeBytes ?? 486);
+      return {
+        key,
+        type,
+        ttlMs,
+        sizeBytes,
+        encoding: isHash ? "listpack" : "embstr",
+        totalCount: isHash ? Object.keys(hashVal || {}).length : key === "leaderboard" ? 3 : sizeBytes,
+        truncated: false,
+        stringValue: type === "string" ? strVal : undefined,
+        hash: hashVal,
+        zset: key === "leaderboard" ? [{ member: "user:1002", score: 9840 }, { member: "user:1044", score: 9112 }, { member: "user:1013", score: 8770 }] : undefined,
+      };
+    },
+    deleteKey: async (_id, _db, key) => {
+      const idx = keyMeta.findIndex((k) => k.key === key);
+      if (idx >= 0) keyMeta.splice(idx, 1);
+      stringOverrides.delete(key);
+      hashOverrides.delete(key);
+      ttlOverrides.delete(key);
+    },
+    hashSet: async (_id, _db, key, field, value) => {
+      const target = ensureHash(key);
+      target[field] = String(value ?? "");
+      let meta = keyMeta.find((k) => k.key === key);
+      if (!meta) {
+        meta = { key, type: "hash", ttlMs: -1, sizeBytes: JSON.stringify(target).length, encoding: "listpack" };
+        keyMeta.unshift(meta);
+      } else {
+        meta.type = "hash";
+        meta.sizeBytes = JSON.stringify(target).length;
+      }
+    },
+    hashDelete: async (_id, _db, key, field) => {
+      const target = ensureHash(key);
+      delete target[field];
+    },
+    setString: async (_id, _db, key, value) => {
+      const str = String(value ?? "");
+      stringOverrides.set(key, str);
+      hashOverrides.delete(key);
+      let meta = keyMeta.find((k) => k.key === key);
+      const sizeBytes = new TextEncoder().encode(str).length;
+      if (!meta) {
+        meta = { key, type: "string", ttlMs: -1, sizeBytes, encoding: "embstr" };
+        keyMeta.unshift(meta);
+      } else {
+        meta.type = "string";
+        meta.sizeBytes = sizeBytes;
+      }
+    },
+    setTTL: async (_id, _db, key, ttlSeconds) => {
+      const ttlMs = Number(ttlSeconds) > 0 ? Math.floor(Number(ttlSeconds)) * 1000 : -1;
+      ttlOverrides.set(key, ttlMs);
+      const meta = keyMeta.find((k) => k.key === key);
+      if (meta) meta.ttlMs = ttlMs;
+    },
     execCLI: async (_id, _db, line, readOnly) => {
       const cmd = line.trim().split(/\s+/)[0].toLowerCase();
       if (readOnly && ["set", "del", "hset", "flushall"].includes(cmd)) {

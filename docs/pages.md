@@ -34,4 +34,4 @@ https://duanyongcheng.github.io/redis-manager/
 
 - 截图来自 `docs/screenshots/`，更新截图后重新推送即可。
 - `site/assets/overview-analyser-{light,dark}.png` 是从总览截图裁出的局部图；总览界面变化时需要同时重新生成。
-- 下载按钮指向当前版本 `v0.2.1` 的 Release 资产；发布新版本时同步更新 `site/index.html` 中的版本号与资产文件名。
+- 下载按钮指向当前版本 `v0.3.0` 的 Release 资产；发布新版本时同步更新 `site/index.html` 中的版本号与资产文件名。
