@@ -10,6 +10,7 @@ type AppInfo struct {
 	Version        string `json:"version"`
 	IsDev          bool   `json:"isDev"`
 	UpdatesEnabled bool   `json:"updatesEnabled"`
+	ConfigDir      string `json:"configDir,omitempty"`
 }
 
 // AppService exposes application actions to the main window. The updater
@@ -17,10 +18,12 @@ type AppInfo struct {
 type AppService struct{}
 
 func (s *AppService) GetAppInfo() AppInfo {
+	dir, _ := defaultConfigDir()
 	return AppInfo{
 		Version:        mygo.App.Version(),
 		IsDev:          mygo.IsDev(),
 		UpdatesEnabled: mygo.Updater.Enabled(),
+		ConfigDir:      dir,
 	}
 }
 

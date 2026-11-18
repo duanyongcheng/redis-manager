@@ -53,12 +53,19 @@ export const application = {
 /**
  * The generated client only works inside a MyGo window; its calls are
  * forwarded to the Go runtime through an injected bridge. Pull it in through
- * `window.RedisService` (written before this module evaluates) or the module
- * export — whichever exists.
+ * `window.RedisService` (when an external mock is injected) or the generated
+ * MyGo bindings when running inside the desktop WebView.
  */
+const resolvedService =
+  globalService && globalService !== bindings.RedisService
+    ? globalService
+    : isMyGo()
+      ? bindings.RedisService
+      : null;
+
 export const api: Api = {
-  available: Boolean(globalService ?? bindings.RedisService),
-  service: globalService ?? bindings.RedisService ?? null,
+  available: resolvedService !== null,
+  service: resolvedService,
 };
 
 export class ApiUnavailableError extends Error {
@@ -109,7 +116,28 @@ export const redis = {
     svc().scanKeys(id, db, pattern, cursor, count),
   getValue: (id: string, db: number, key: string): Promise<RedisValue> => svc().getValue(id, db, key),
   deleteKey: (id: string, db: number, key: string): Promise<void> => svc().deleteKey(id, db, key),
+  setTTL: (id: string, db: number, key: string, ttlSeconds: number): Promise<void> => {
+    const s = svc() as Partial<Service>;
+    if (typeof s.setTTL !== "function") {
+      return Promise.reject(new Error("当前环境不支持修改 TTL"));
+    }
+    return s.setTTL(id, db, key, ttlSeconds);
+  },
+  setString: (id: string, db: number, key: string, value: string): Promise<void> => {
+    const s = svc() as Partial<Service>;
+    if (typeof s.setString !== "function") {
+      return Promise.reject(new Error("当前环境不支持写入 String"));
+    }
+    return s.setString(id, db, key, value);
+  },
   hashSet: (id: string, db: number, key: string, field: string, value: string): Promise<void> => svc().hashSet(id, db, key, field, value),
+  hashDelete: (id: string, db: number, key: string, field: string): Promise<void> => {
+    const s = svc() as Partial<Service>;
+    if (typeof s.hashDelete !== "function") {
+      return Promise.reject(new Error("当前环境不支持删除 Hash 字段"));
+    }
+    return s.hashDelete(id, db, key, field);
+  },
   execCLI: (id: string, db: number, line: string, readOnly: boolean): Promise<CLIResult> => svc().execCLI(id, db, line, readOnly),
 };
 

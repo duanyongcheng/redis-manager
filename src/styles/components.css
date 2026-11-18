@@ -1519,3 +1519,59 @@
 .color-swatch:hover { border-color: var(--fg-3); }
 .color-swatch.active { border-color: var(--fg); transform: translateY(-1px); }
 .color-swatch:focus-visible { outline: 1.5px solid var(--focus); outline-offset: 2px; }
+
+/* ----------------------------------------------------- table cell controls */
+.cell-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+.tbl tbody tr:hover .cell-actions,
+.tbl tbody tr:focus-within .cell-actions,
+.cell-actions:focus-within {
+  opacity: 1;
+}
+.cell-actions .icon-btn {
+  width: 22px;
+  height: 22px;
+}
+.cell-actions .btn {
+  height: 20px;
+  padding: 0 6px;
+  font-size: 10.5px;
+}
+
+.cell-expanded {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-data);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.cell-expanded:first-child {
+  margin-top: 0;
+}
+.tbl td:has(.cell-expanded) {
+  height: auto;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  vertical-align: top;
+}
+
+@media (max-width: 1180px) {
+  .cell-actions { opacity: 1; }
+}

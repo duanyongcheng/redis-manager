@@ -46,7 +46,7 @@ export function settingsView(s: ViewState): string {
           <div class="setting-row"><div><b>SCAN 批量</b><span class="hint">每次 SCAN 的 COUNT，越大单次越快但越占带宽</span></div>
             <select class="select" data-setting="scanCount" aria-label="SCAN 批量">${[50, 100, 200, 500, 1000].map((n) => `<option value="${n}" ${current.scanCount === n ? "selected" : ""}>${n}</option>`).join("")}</select>
           </div>
-          <div class="setting-row"><div><b>单次载入值上限</b><span class="hint">超过上限的值只渲染前 200 KB，避免界面卡死</span></div>
+          <div class="setting-row"><div><b>单次载入值上限</b><span class="hint">超过所选上限的值将截断渲染，避免大键阻塞界面</span></div>
             <select class="select" data-setting="maxValueBytes" aria-label="单次载入值上限">${[
               [256 * 1024, "256 KB"],
               [1024 * 1024, "1 MB"],
@@ -76,7 +76,7 @@ export function settingsView(s: ViewState): string {
             </select>
           </div>
           <div class="setting-row"><div><b>危险命令保护</b><span class="hint">KEYS / FLUSHALL 等会拦截并要求改用安全替代</span></div><span class="badge acc">已启用</span></div>
-          <div class="setting-row"><div><b>连接配置文件</b><span class="hint">${esc(configHint)}</span></div><span class="mono faint" style="font-size:11px">connections.json</span></div>`,
+          <div class="setting-row"><div><b>连接配置文件</b><span class="hint">${esc(configHint)}</span></div><span class="mono faint" style="font-size:11px">${esc(info?.configDir ? `${info.configDir}/connections.json` : "connections.json")}</span></div>`,
       })}
       ${pane({
         title: "快捷键",

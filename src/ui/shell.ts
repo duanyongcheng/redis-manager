@@ -164,7 +164,7 @@ export function tabs(s: ViewState): string {
 /* Status bar — facts only, no decoration                              */
 /* ------------------------------------------------------------------ */
 
-export function statusbar(s: ViewState): string {
+export function statusbar(_s: ViewState): string {
   const conn = currentConnection();
   const hist = currentHistory();
   const last = hist[hist.length - 1];
@@ -214,7 +214,7 @@ export function paletteList(s: ViewState, query: string, activeAction = ""): str
   if (s.connections.length) {
     groups.push({
       title: "连接",
-      items: s.connections.map((c) => ({ label: c.name || connAddress(c), hint: `${connAddress(c)}/db${c.db}`, action: `conn:${c.id}`, iconName: "server" })),
+      items: s.connections.map((c) => ({ label: c.name || connAddress(c), hint: `${connAddress(c)}/db${c.id === conn?.id ? currentDb(c) : c.db}`, action: `conn:${c.id}`, iconName: "server" })),
     });
   }
   if (conn && s.keys.length) {

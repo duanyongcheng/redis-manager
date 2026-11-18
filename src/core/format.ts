@@ -337,20 +337,14 @@ function markdownInline(value: string): string {
 
 /** Builds a document for a script-disabled, opaque-origin preview iframe. */
 export function htmlPreviewDocument(value: string | null | undefined): string {
-  const safe = String(value ?? "")
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
-    .replace(/<\/?(script|iframe|frame|frameset|object|embed|base|meta|link|form)\b[^>]*>/gi, "")
-    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-    .replace(/\s+(?:href|src)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*'|javascript:[^\s>]+)/gi, "");
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'">`;
-  const source = safe.trim();
+  const raw = String(value ?? "");
+  const source = raw.trim();
   const fullDocument = /<(?:html|head|body)\b/i.test(source) || /^<!doctype\s+html\b/i.test(source);
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; base-uri 'none'; form-action 'none'">`;
   // Put the policy before any source markup. The HTML parser merges the
   // source's html/head/body into the document, retaining attributes and CSS.
   // Full documents keep their own typography, table spacing and borders.
   const prefix = `<!doctype html><meta charset="utf-8">${csp}<style>:root { color-scheme: light; }</style>`;
-  if (fullDocument) return prefix + source;
-
   const fragmentStyle = `<style>
     :root { color-scheme: light; }
     :where(body) { margin: 24px; color: #20242b; background: #fff; font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: break-word; }
@@ -361,6 +355,39 @@ export function htmlPreviewDocument(value: string | null | undefined): string {
     :where(th:not([align]), td:not([align])) { text-align: left; }
     :where(a) { color: #d54b3e; }
   </style>`;
+
+  if (typeof DOMParser !== "undefined") {
+    const doc = new DOMParser().parseFromString(raw, "text/html");
+    doc.querySelectorAll("script, iframe, frame, frameset, object, embed, base, meta, link, form").forEach((el) => el.remove());
+    const urlAttrs = new Set(["href", "src", "xlink:href", "action", "formaction"]);
+    for (const el of Array.from(doc.querySelectorAll("*"))) {
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith("on")) {
+          el.removeAttribute(attr.name);
+          continue;
+        }
+        if (urlAttrs.has(name)) {
+          const cleaned = attr.value.replace(/^[\u0000-\u0020]+/, "").replace(/[\u0000-\u001f]+/g, "").toLowerCase();
+          if (cleaned.startsWith("javascript:") || cleaned.startsWith("vbscript:")) {
+            el.removeAttribute(attr.name);
+          }
+        }
+      }
+    }
+    if (fullDocument) return prefix + doc.documentElement.outerHTML;
+    return `<!doctype html><html><head><meta charset="utf-8">${csp}${fragmentStyle}${doc.head.innerHTML}</head><body>${doc.body.innerHTML}</body></html>`;
+  }
+
+  const safe = raw
+    .replace(/<script\b(?:"[^"]*"|'[^']*'|[^>"'])*>[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<\/?(script|iframe|frame|frameset|object|embed|base|meta|link|form)\b(?:"[^"]*"|'[^']*'|[^>"'])*>/gi, "")
+    .replace(/\s+on[a-z0-9_-]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(
+      /\s+(?:href|src|xlink:href|action|formaction)\s*=\s*(?:"[\u0000-\u0020]*(?:javascript|vbscript):[^"]*"|'[\u0000-\u0020]*(?:javascript|vbscript):[^']*'|[\u0000-\u0020]*(?:javascript|vbscript):[^\s>]+)/gi,
+      "",
+    );
+  if (fullDocument) return prefix + safe.trim();
   return `<!doctype html><html><head><meta charset="utf-8">${csp}${fragmentStyle}</head><body>${safe}</body></html>`;
 }
 
@@ -369,6 +396,56 @@ export const writeCommands = new Set([
   "incr", "incrby", "lpop", "lpush", "lrem", "lset", "ltrim", "mset", "persist", "pexpire", "rename", "rpop",
   "rpush", "sadd", "set", "setex", "srem", "sunionstore", "unlink", "xadd", "xdel", "xtrim", "zadd", "zrem",
 ]);
+
+const READ_ONLY_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
+  config: new Set(["get", "help"]),
+  client: new Set(["list", "info", "getname", "id", "getredir", "trackinginfo", "help"]),
+  slowlog: new Set(["get", "len", "help"]),
+  memory: new Set(["usage", "stats", "doctor", "malloc-stats", "help"]),
+  cluster: new Set([
+    "info", "nodes", "slots", "shards", "slaves", "replicas", "keyslot",
+    "countkeysinslot", "getkeysinslot", "count-failure-reports", "links", "myid", "myshardid", "help",
+  ]),
+  acl: new Set(["whoami", "list", "users", "getuser", "cat", "log", "dryrun", "genpass", "help"]),
+  object: new Set(["encoding", "freq", "idletime", "refcount", "help"]),
+  script: new Set(["exists", "show", "help"]),
+  function: new Set(["list", "dump", "stats", "help"]),
+  pubsub: new Set(["channels", "numpat", "numsub", "shardchannels", "shardnumsub", "help"]),
+  latency: new Set(["latest", "history", "graph", "doctor", "histogram", "help"]),
+  xinfo: new Set(["consumers", "groups", "stream", "help"]),
+};
+
+const EXTRA_WRITE_COMMANDS = new Set([
+  "bitfield", "bitop", "blmove", "blmpop", "blpop", "brpop", "brpoplpush", "bzmpop", "bzpopmax", "bzpopmin",
+  "copy", "decr", "decrby", "eval", "evalsha", "expire", "expireat", "fcall", "geoadd", "geosearchstore",
+  "getdel", "getex", "getset", "hincrby", "hincrbyfloat", "hsetnx", "incrbyfloat", "linsert", "lmove",
+  "lmpop", "lpushx", "migrate", "move", "msetnx", "pexpireat", "pfadd", "pfmerge", "psetex", "publish",
+  "renamenx", "replicaof", "restore", "rpoplpush", "rpushx", "save", "sdiffstore", "setbit", "setnx",
+  "setrange", "shutdown", "sinterstore", "slaveof", "smove", "spop", "swapdb", "xack", "xautoclaim",
+  "xclaim", "xgroup", "zdiffstore", "zincrby", "zinterstore", "zmpop", "zpopmax", "zpopmin",
+  "zremrangebylex", "zremrangebyrank", "zremrangebyscore", "zunionstore",
+]);
+
+export function isWriteCommand(lineOrArgs: string | string[]): boolean {
+  const args = Array.isArray(lineOrArgs) ? lineOrArgs : splitCommandLine(String(lineOrArgs ?? ""));
+  if (args.length === 0) return false;
+  const cmd = (args[0] ?? "").toLowerCase();
+  if (!cmd) return false;
+  const sub = (args[1] ?? "").toLowerCase();
+
+  if (cmd === "acl" && sub === "log" && (args[2] ?? "").toLowerCase() === "reset") {
+    return true;
+  }
+  const roSubs = READ_ONLY_SUBCOMMANDS[cmd];
+  if (roSubs) {
+    if (!sub) return false;
+    return !roSubs.has(sub);
+  }
+  if (cmd === "sort") {
+    return args.slice(1).some((arg) => arg.toLowerCase() === "store");
+  }
+  return writeCommands.has(cmd) || EXTRA_WRITE_COMMANDS.has(cmd);
+}
 
 export const BLOCKING_COMMANDS = new Set(["keys", "monitor", "debug", "script"]);
 

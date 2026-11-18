@@ -14,17 +14,21 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 
 const port = process.argv[2] || "4173";
+const filter = process.argv[3] || "";
 const base = `http://localhost:${port}/`;
 const outDir = "docs/screenshots";
 mkdirSync(outDir, { recursive: true });
 
 const demoCli = "window.__RM_PREVIEW_DEMO__(['INFO keyspace','HGETALL user:1002','KEYS user:100*','SCAN 0 MATCH user:100* COUNT 3'])";
 
+const htmlPreviewAction = "(async()=>{document.querySelector('[data-key=\"cache:home:feed\"]')?.click();for(let i=0;i<40&&!document.querySelector('[data-seg-value=html]');i++)await new Promise(r=>setTimeout(r,50));document.querySelector('[data-seg-value=html]')?.click();await new Promise(r=>setTimeout(r,1500));})()";
+
 // [scheme, view, extra evaluation, file suffix]
 const SHOTS = [
   // Light is the default scheme, so it is captured first.
   ["light", "overview", "", ""],
-  ["light", "browser", "document.querySelector('[data-key=\"cache:home:feed\"]')?.click(); document.querySelector('[data-seg-value=html]')?.click()", "-value-preview"],
+  ["light", "browser", "", ""],
+  ["light", "browser", htmlPreviewAction, "-value-preview"],
   ["light", "cli", demoCli, ""],
   ["light", "monitor", "", ""],
   ["light", "connections", "", ""],
@@ -57,6 +61,7 @@ try {
   await new Promise((r) => setTimeout(r, 2500));
   for (const [scheme, page, action = "", suffix = ""] of SHOTS) {
     const name = `${page}${suffix}-${scheme}.png`;
+    if (filter && !name.includes(filter)) continue;
     const url = `${base}?preview=1&scheme=${scheme}&page=${page}`;
     try {
       const out = await run("node", ["scripts/cdp-shot.mjs", `${outDir}/${name}`, url, "1440", "900", "7000", action || "1"], true);

@@ -4,17 +4,19 @@ import { activeCliSession, cliSessionsFor, currentConnection, currentDb, type Cl
 import { settings } from "../theme/settings";
 import { emptyState } from "../ui/kit";
 
-export function cliView(s: ViewState): string {
+export function cliView(_s: ViewState): string {
   const conn = currentConnection();
   if (!conn) return emptyState("还没有连接", "CLI 需要先选择一个连接。", { label: "新建连接", action: "new-connection" });
   const db = currentDb(conn);
   const sessions = cliSessionsFor(conn);
   const active = activeCliSession();
   if (!active) return "";
+  const effectiveReadOnly = Boolean(conn.readOnly || active.readOnly);
 
   const sessionTabs = sessions
     .map(
-      (session, i) => `<button type="button" class="cli-session ${session === active ? "active" : ""}" data-session-tab="${i}">${esc(session.name)}${session === active ? `<span class="kbd">${i}</span>` : ""}</button>`,
+      (session, i) =>
+        `<button type="button" class="cli-session ${session === active ? "active" : ""}" data-session-tab="${i}">${esc(session.name)}${session === active ? `<span class="kbd">${i}</span>` : ""}${sessions.length > 1 ? `<span class="cli-session-close" data-cli-close="${i}" title="关闭会话" role="button" aria-label="关闭会话">${icon("x", 10)}</span>` : ""}</button>`,
     )
     .join("");
 
@@ -24,8 +26,8 @@ export function cliView(s: ViewState): string {
       <div class="cli-mode">
         <span class="mlabel">模式</span>
         <div class="segmented">
-          <button class="${active.readOnly ? "active" : ""}" data-cli-mode="readonly" aria-pressed="${active.readOnly}">${icon("lock", 10)} 只读</button>
-          <button class="${active.readOnly ? "" : "active"}" data-cli-mode="write" aria-pressed="${!active.readOnly}">可写</button>
+          <button type="button" class="${effectiveReadOnly ? "active" : ""}" data-cli-mode="readonly" aria-pressed="${effectiveReadOnly}">${icon("lock", 10)} 只读</button>
+          <button type="button" class="${effectiveReadOnly ? "" : "active"}" data-cli-mode="write" aria-pressed="${!effectiveReadOnly}" ${conn.readOnly ? 'disabled title="该连接已配置为只读模式"' : ""}>可写</button>
         </div>
       </div>
     </header>
@@ -45,7 +47,7 @@ function logHtml(session: CliSession, conn: NonNullable<ReturnType<typeof curren
   if (!session.lines.length) {
     return `<div class="cli-welcome">
       <div class="dim">Redis Manager CLI · ${esc(connAddress(conn))}/db${db}</div>
-      <div class="faint">已连接 ${esc(conn.name)}，当前为${session.readOnly ? "只读" : "可写"}模式 · ↑/↓ 浏览历史 · Tab 补全命令 · ⌘K 清屏</div>
+      <div class="faint">已连接 ${esc(conn.name)}，当前为${conn.readOnly || session.readOnly ? "只读" : "可写"}模式 · ↑/↓ 浏览历史 · Tab 补全命令 · ⌘L 清屏</div>
       <div class="faint">试试 <span class="acc">INFO keyspace</span>、<span class="acc">DBSIZE</span> 或 <span class="acc">SCAN 0 MATCH user:* COUNT 10</span>。</div>
     </div>`;
   }
@@ -76,7 +78,7 @@ function colourLine(kind: string, text: string): string {
 function suggestions(session: CliSession): string {
   if (!session.history.length) {
     return `${["INFO server", "DBSIZE", "SCAN 0 COUNT 10", "CLIENT LIST", "SLOWLOG GET 5"].map((c) => `<button class="chip" data-fill="${esc(c)}">${esc(c)}</button>`).join("")}
-      <span class="spacer"></span><span class="faint mono">Tab 补全 · ↑↓ 历史 · ⌘K 清屏</span>`;
+      <span class="spacer"></span><span class="faint mono">Tab 补全 · ↑↓ 历史 · ⌘L 清屏</span>`;
   }
   return `<span class="faint mono">最近</span>${session.history
     .slice(-6)

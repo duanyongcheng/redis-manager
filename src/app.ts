@@ -1,34 +1,40 @@
 import { bindCharts } from "./core/charts";
-import { api, errorMessage, redis } from "./core/api";
+import { api, errorMessage, redis, type Connection } from "./core/api";
 import { esc, splitCommandLine } from "./core/format";
 import { icon } from "./core/icons";
 import {
   activeCliSession,
   addCliSession,
-  clearCliLog,
   checkForUpdates,
+  clearCliLog,
+  closeCliSession,
   confirmDialog,
+  createNewKey,
   currentConnection,
   currentDb,
+  currentHistory,
   deleteSelectedKey,
   go,
-  loadMonitor,
   loadAppInfo,
   loadCredentialStorage,
+  loadMonitor,
   loadOverview,
   notify,
   onChange,
   openKey,
   patch,
   refreshConnections,
-  currentHistory,
   removeConnection,
+  removeHashField,
   runCli,
   saveConnection,
   saveHashField,
+  saveKeyTtl,
+  saveStringValue,
   scanKeys,
   selectConnection,
   selectDatabase,
+  selectKey,
   setCliReadOnly,
   setCredentialStorage,
   startPolling,
@@ -36,15 +42,28 @@ import {
   stopPolling,
   testConnection,
   toast,
+  type ChangeKind,
   type MetricSample,
   type PageId,
   type ViewState,
 } from "./core/store";
 import { settings } from "./theme/settings";
 import { isScheme, type Scheme } from "./theme/themes";
-import { browserView } from "./views/browser";
+import {
+  browserView,
+  closeStringEditor,
+  currentBrowserKeyId,
+  isStringEditing,
+  isTtlEditing,
+  newKeyDialog,
+  openStringEditor,
+  setTtlEditing,
+  toggleExpandedCell,
+  updateStringDraft,
+  type NewKeyDraft,
+} from "./views/browser";
 import { cliView } from "./views/cli";
-import { connectionsView, connectionDialog, editorDraft, type EditorDraft } from "./views/connections";
+import { connectionDialog, connectionsView, editorDraft, type EditorDraft } from "./views/connections";
 import { monitorView } from "./views/monitor";
 import { overviewView, setWindowSize } from "./views/overview";
 import { settingsView } from "./views/settings";
@@ -55,11 +74,20 @@ interface LocalUi {
   testResult: { kind: "ok" | "err" | "info"; text: string } | null;
   draft: EditorDraft | null;
   editor: ViewState["connectionEditor"];
+  newKeyDraft: NewKeyDraft | null;
   paletteQuery: string;
   paletteAction: string;
 }
 
-const ui: LocalUi = { windowSize: "45", testResult: null, draft: null, editor: null, paletteQuery: "", paletteAction: "" };
+const ui: LocalUi = {
+  windowSize: "45",
+  testResult: null,
+  draft: null,
+  editor: null,
+  newKeyDraft: null,
+  paletteQuery: "",
+  paletteAction: "",
+};
 
 const root = document.getElementById("root")!;
 
@@ -76,68 +104,191 @@ const PAGE_VIEWS: Record<PageId, (s: ViewState) => string> = {
   settings: settingsView,
 };
 
-let scrollMemo: Record<string, number> = {};
+const scrollMemo: Record<string, number> = {};
 let firstPaint = true;
 let testRequest = 0;
-/** The session the live prompt's draft belongs to; re-pointed on each paint. */
-let draftSessionRef: { input?: string; id?: string } | null = null;
-/** The session the live prompt was painted for, so drafts never cross over. */
-/** The prompt node is about to be replaced by another session's prompt. */
 let sessionSwitchPending = false;
+let keyRoveTimer: number | null = null;
+let lastValueKeyId = "";
 const hashEditVersions = new WeakMap<HTMLFormElement, number>();
+
+function cancelKeyRove() {
+  if (keyRoveTimer != null) {
+    window.clearTimeout(keyRoveTimer);
+    keyRoveTimer = null;
+  }
+}
+
+/**
+ * Strips formatting whitespace text nodes between HTML tags so they never
+ * become flex/grid items inside layout containers.
+ */
+function parseCleanFragment(html: string): HTMLDivElement {
+  const container = document.createElement("div");
+  container.innerHTML = html;
+  const stray = document.createNodeIterator(container, NodeFilter.SHOW_TEXT);
+  const blanks: Text[] = [];
+  for (let node = stray.nextNode(); node; node = stray.nextNode()) {
+    if (!(node as Text).data.trim()) blanks.push(node as Text);
+  }
+  for (const node of blanks) node.remove();
+  return container;
+}
+
+/**
+ * Lightweight chrome-only patch for background 4s metric polling while the user
+ * is working in Browser, CLI, or Settings. Leaves `.content` completely untouched
+ * so large key lists, previews, text selections, and form drafts never flicker.
+ */
+function updateMetricsChrome(s: ViewState) {
+  const conn = currentConnection();
+
+  const liveSidebar = root.querySelector<HTMLElement>(".sidebar");
+  if (liveSidebar) {
+    const freshSidebar = parseCleanFragment(sidebar(s));
+    const liveTitle = liveSidebar.querySelector<HTMLElement>(".sidebar-title");
+    const freshTitle = freshSidebar.querySelector<HTMLElement>(".sidebar-title");
+    if (liveTitle && freshTitle && liveTitle.textContent !== freshTitle.textContent) {
+      liveTitle.textContent = freshTitle.textContent;
+    }
+    const liveConnList = liveSidebar.querySelector<HTMLElement>(".conn-list");
+    const freshConnList = freshSidebar.querySelector<HTMLElement>(".conn-list");
+    if (liveConnList && freshConnList && liveConnList.innerHTML !== freshConnList.innerHTML) {
+      const prevTop = liveConnList.scrollTop;
+      liveConnList.replaceChildren(...Array.from(freshConnList.childNodes));
+      liveConnList.scrollTop = prevTop;
+    }
+  }
+
+  const liveInstHead = root.querySelector<HTMLElement>(".inst-head");
+  const instHtml = instanceHead(s);
+  if (instHtml) {
+    const dbFocused = Boolean(document.activeElement?.hasAttribute("data-db-select"));
+    const liveDbSelect = liveInstHead?.querySelector<HTMLSelectElement>("[data-db-select]") ?? null;
+    const freshInst = parseCleanFragment(instHtml).firstElementChild as HTMLElement | null;
+    if (freshInst) {
+      const freshDbSelect = freshInst.querySelector<HTMLSelectElement>("[data-db-select]");
+      if (dbFocused && liveDbSelect && freshDbSelect && liveDbSelect.innerHTML === freshDbSelect.innerHTML && liveDbSelect.value === freshDbSelect.value) {
+        freshDbSelect.replaceWith(liveDbSelect);
+      }
+      if (liveInstHead) liveInstHead.replaceWith(freshInst);
+      else root.querySelector(".main")?.prepend(freshInst);
+      if (dbFocused) {
+        freshInst.querySelector<HTMLElement>("[data-db-select]")?.focus({ preventScroll: true });
+      }
+    }
+  } else if (liveInstHead) {
+    liveInstHead.remove();
+  }
+
+  const liveTabs = root.querySelector<HTMLElement>(".tabs");
+  const freshTabs = parseCleanFragment(tabs(s)).firstElementChild as HTMLElement | null;
+  if (liveTabs && freshTabs && liveTabs.outerHTML !== freshTabs.outerHTML) {
+    liveTabs.replaceWith(freshTabs);
+  }
+
+  const liveStatus = root.querySelector<HTMLElement>(".statusbar");
+  const freshStatus = parseCleanFragment(statusbar(s)).firstElementChild as HTMLElement | null;
+  if (liveStatus && freshStatus && liveStatus.outerHTML !== freshStatus.outerHTML) {
+    liveStatus.replaceWith(freshStatus);
+  }
+
+  document.title = conn ? `Redis Manager — ${conn.name || conn.host}` : "Redis Manager";
+}
 
 /**
  * Re-renders the shell from an HTML string.
  *
  * The default is a wholesale replacement, which keeps the DOM exactly equal to
  * the template. Only subtrees whose live identity matters survive a paint:
- * an open dialog's form, an open document (iframe), a focused CLI prompt and
- * the scroll position of the lists the user is reading. Five layers of patch
- * selectors quietly diverging from the markup was the previous failure mode,
- * so the patch list is deliberately short and structural.
+ * an open dialog's form, an open document (iframe), a focused CLI prompt, an
+ * active text selection, and the scroll position of the lists the user is reading.
  */
-function updateRenderedApp(html: string, promptState: { focused: boolean; selection: { start: number | null; end: number | null; direction: "forward" | "backward" | "none" | null } | null } = { focused: false, selection: null }) {
-  const next = document.createElement("div");
-  next.innerHTML = html;
-
-  // Strip formatting whitespace between elements: those text nodes would
-  // otherwise become flex/grid items inside every layout container.
-  const stray = document.createNodeIterator(next, NodeFilter.SHOW_TEXT);
-  const blanks: Text[] = [];
-  for (let node = stray.nextNode(); node; node = stray.nextNode()) {
-    if (!(node as Text).data.trim()) blanks.push(node as Text);
-  }
-  for (const node of blanks) node.remove();
+function updateRenderedApp(
+  html: string,
+  promptState: {
+    focused: boolean;
+    selection: { start: number | null; end: number | null; direction: "forward" | "backward" | "none" | null } | null;
+  } = { focused: false, selection: null },
+) {
+  const next = parseCleanFragment(html);
 
   const promptFocus = promptState.focused;
-  const formText = readFormValues(root.querySelector("#connection-form"));
+  const formText = readFormValues(root.querySelector("#connection-form"), "data-field");
+  const newKeyFormText = readFormValues(root.querySelector("#new-key-form"), "data-nk-field");
   const keep = new Map<string, Element>();
-  // The connection form is rebuilt from its draft on purpose: its visible
-  // shape (mode-specific fields) must follow the state, and its values are
-  // restored below.
-  for (const selector of [".html-preview", "#cli-input", "#cli-log", ".value-body", ".key-list", ".stream-body", "#hash-form", ".filterbar"]) {
+  for (const selector of [
+    ".html-preview",
+    "#cli-input",
+    "#cli-log",
+    ".value-body",
+    ".key-list",
+    ".stream-body",
+    ".tbl-wrap",
+    "#hash-form",
+    "#string-form",
+    "#ttl-form",
+    ".filterbar",
+  ]) {
     const live = root.querySelector(selector);
     if (live) keep.set(selector, live);
   }
 
-  // Any focused control the template can reproduce (by id) keeps its focus and
-  // caret: a rebuild must never move the user's cursor out of the field they
-  // are typing in. Selection is read before the paint removes it.
-  const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
-  // A control without an id is named by the data attribute that identifies it.
-  const focusId = active && active !== document.body && active.id && active.id !== "cli-input"
-    ? active.id
-    : active?.dataset.setting
-      ? `[data-setting="${active.dataset.setting}"]`
-      : active?.hasAttribute("data-db-select")
-        ? "[data-db-select]"
-        // Form controls inside a repeated row are named by their section + name.
-        : "";
-  const focusSelection = focusId && typeof active?.selectionStart === "number"
-    ? { start: active.selectionStart, end: active.selectionEnd ?? active.selectionStart, direction: active.selectionDirection ?? "none" }
-    : null;
+  // Capture non-collapsed user text selection inside `.value-body` or `#cli-log`
+  // as raw node/offset endpoints (a live `Range` would be collapsed to `(root, 0)`
+  // by the DOM standard when `replaceChildren` detaches the old `.app` subtree).
+  const sel = window.getSelection();
+  let selectionKeepSelector: ".value-body" | "#cli-log" | null = null;
+  let selectionSavedEndpoints: {
+    startContainer: Node;
+    startOffset: number;
+    endContainer: Node;
+    endOffset: number;
+  } | null = null;
+  if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    const anchor = range.commonAncestorContainer;
+    const liveValue = keep.get(".value-body");
+    const liveLog = keep.get("#cli-log");
+    if (liveValue && liveValue.contains(anchor)) {
+      selectionKeepSelector = ".value-body";
+      selectionSavedEndpoints = {
+        startContainer: range.startContainer,
+        startOffset: range.startOffset,
+        endContainer: range.endContainer,
+        endOffset: range.endOffset,
+      };
+    } else if (liveLog && liveLog.contains(anchor)) {
+      selectionKeepSelector = "#cli-log";
+      selectionSavedEndpoints = {
+        startContainer: range.startContainer,
+        startOffset: range.startOffset,
+        endContainer: range.endContainer,
+        endOffset: range.endOffset,
+      };
+    }
+  }
 
-  // Lists keep their node so the scroll offset survives the paint.
+  const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+  const focusedKeyRow = active?.classList.contains("key-row") ? active.dataset.key ?? null : null;
+  const focusedSampleRow = active?.classList.contains("srow") ? active.dataset.sample ?? null : null;
+  const focusId =
+    active && active !== document.body && active.id && active.id !== "cli-input"
+      ? active.id
+      : active?.dataset.setting
+        ? `[data-setting="${active.dataset.setting}"]`
+        : active?.hasAttribute("data-db-select")
+          ? "[data-db-select]"
+          : "";
+  const focusSelection =
+    focusId && typeof active?.selectionStart === "number"
+      ? {
+          start: active.selectionStart,
+          end: active.selectionEnd ?? active.selectionStart,
+          direction: active.selectionDirection ?? "none",
+        }
+      : null;
+
   const listScroll = new Map<string, number>();
   for (const [selector, live] of keep) {
     if (live instanceof HTMLElement) listScroll.set(selector, live.scrollTop);
@@ -146,62 +297,89 @@ function updateRenderedApp(html: string, promptState: { focused: boolean; select
   root.replaceChildren(...Array.from(next.childNodes));
   firstPaint = false;
 
-  // A live document is only carried over when its own markup is unchanged:
-  // adopting a different document would show the previous value.
-  const liveFrame = keep.get(".html-preview");
-  const freshFrame = root.querySelector(".html-preview");
-  if (liveFrame && freshFrame) {
-    const same = (liveFrame as HTMLElement).outerHTML === (freshFrame as HTMLElement).outerHTML;
-    if (same) freshFrame.replaceWith(liveFrame);
-  }
-
-  // The command prompt is a live editing surface: keep the node (and with it
-  // the draft, caret, selection direction and focus) while metrics refresh.
-  // The hash form is a draft for one key: carry it only within the same key.
-  const liveHash = keep.get("#hash-form");
-  const freshHash = root.querySelector("#hash-form");
-  if (liveHash && freshHash && liveHash.getAttribute("data-key") === freshHash.getAttribute("data-key")) {
-    freshHash.replaceWith(liveHash);
-    const activeField = liveHash.querySelector<HTMLInputElement>(`[name="${active?.name}"]`);
-    if (active && liveHash.contains(active) && activeField) {
-      activeField.focus({ preventScroll: true });
-      if (focusSelection) {
-        try {
-          activeField.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
-        } catch {
-          /* number inputs reject ranges */
+  // Preserve active text selection in `.value-body` or `#cli-log` across toast / chrome updates.
+  if (selectionKeepSelector) {
+    const liveSelHost = keep.get(selectionKeepSelector);
+    const freshSelHost = root.querySelector(selectionKeepSelector);
+    if (
+      liveSelHost &&
+      freshSelHost &&
+      liveSelHost !== freshSelHost &&
+      liveSelHost.className === freshSelHost.className &&
+      liveSelHost.innerHTML === freshSelHost.innerHTML
+    ) {
+      freshSelHost.replaceWith(liveSelHost);
+      if (selectionSavedEndpoints) {
+        const afterSel = window.getSelection();
+        if (afterSel) {
+          try {
+            const restored = document.createRange();
+            restored.setStart(selectionSavedEndpoints.startContainer, selectionSavedEndpoints.startOffset);
+            restored.setEnd(selectionSavedEndpoints.endContainer, selectionSavedEndpoints.endOffset);
+            afterSel.removeAllRanges();
+            afterSel.addRange(restored);
+          } catch {
+            /* ignore if range cannot be restored */
+          }
         }
       }
     }
   }
 
-  // The SCAN pattern field is a draft: carry it while it holds the same text.
-  const liveFilters = keep.get(".filterbar");
-  const freshFilters = root.querySelector(".filterbar");
-  if (liveFilters && freshFilters) {
-    const livePattern = (liveFilters as HTMLElement).querySelector<HTMLInputElement>("#key-pattern");
-    const freshPattern = (freshFilters as HTMLElement).querySelector<HTMLInputElement>("#key-pattern");
-    if (livePattern && freshPattern && livePattern.value === freshPattern.value) {
-      freshFilters.replaceWith(liveFilters);
-      if (active && liveFilters.contains(active) && active instanceof HTMLInputElement) {
-        active.focus({ preventScroll: true });
-        if (focusSelection) active.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+  // A live document is only carried over when its own markup is unchanged.
+  const liveFrame = keep.get(".html-preview");
+  const freshFrame = root.querySelector(".html-preview");
+  if (liveFrame && freshFrame && liveFrame !== freshFrame) {
+    const same = (liveFrame as HTMLElement).outerHTML === (freshFrame as HTMLElement).outerHTML;
+    if (same) freshFrame.replaceWith(liveFrame);
+  }
+
+  // Carry over per-key inline forms (`#hash-form`, `#string-form`, `#ttl-form`) while editing the same key.
+  for (const formSel of ["#hash-form", "#string-form", "#ttl-form"] as const) {
+    const liveForm = keep.get(formSel);
+    const freshForm = root.querySelector(formSel);
+    if (liveForm && freshForm && liveForm !== freshForm && liveForm.getAttribute("data-key") === freshForm.getAttribute("data-key")) {
+      freshForm.replaceWith(liveForm);
+      if (active && liveForm.contains(active)) {
+        const activeField = active.name ? liveForm.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="${active.name}"]`) : active;
+        if (activeField) {
+          activeField.focus({ preventScroll: true });
+          if (focusSelection && typeof activeField.setSelectionRange === "function") {
+            try {
+              activeField.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+            } catch {
+              /* number inputs reject ranges */
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Carry over filterbar text inputs (`#key-pattern` and `#key-filter`) when their text matches,
+  // while letting `.filterbar-meta`, grouping chip, and New Key button update freely.
+  const liveFilters = keep.get(".filterbar") as HTMLElement | undefined;
+  const freshFilters = root.querySelector<HTMLElement>(".filterbar");
+  if (liveFilters && freshFilters && liveFilters !== freshFilters) {
+    for (const inputId of ["#key-pattern", "#key-filter"]) {
+      const liveInput = liveFilters.querySelector<HTMLInputElement>(inputId);
+      const freshInput = freshFilters.querySelector<HTMLInputElement>(inputId);
+      if (liveInput && freshInput && liveInput.value === freshInput.value) {
+        freshInput.replaceWith(liveInput);
+        if (active === liveInput) {
+          liveInput.focus({ preventScroll: true });
+          if (focusSelection) liveInput.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+        }
       }
     }
   }
 
   const livePrompt = keep.get("#cli-input");
   const freshPrompt = root.querySelector("#cli-input");
-  if (livePrompt && freshPrompt) {
-    // The prompt is a per-session draft, not a value: carry it only while the
-    // session it belongs to is the one still on screen, then take back the
-    // focus the detach costs.
+  if (livePrompt && freshPrompt && livePrompt !== freshPrompt) {
     const sameSession = (livePrompt as HTMLInputElement).dataset.session === (freshPrompt as HTMLInputElement).dataset.session;
     const sameValue = (livePrompt as HTMLInputElement).value === (freshPrompt as HTMLInputElement).value;
-
     if (sameSession && sameValue) {
-      // The node is the caret and selection; the value is the draft. The
-      // fresh node is authoritative for everything else, the selection included.
       freshPrompt.replaceWith(livePrompt);
       if (promptFocus && livePrompt instanceof HTMLInputElement) {
         const selection = promptState.selection;
@@ -216,14 +394,9 @@ function updateRenderedApp(html: string, promptState: { focused: boolean; select
     if (fresh) fresh.scrollTop = top;
   }
 
-  // Restore what the user was doing: form contents, focus, caret.
-  const form = root.querySelector<HTMLFormElement>("#connection-form");
-  if (form && formText.size) {
-    for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-field]"))) {
-      const value = formText.get(el.dataset.field ?? "");
-      if (value != null && el.value !== value) el.value = value;
-    }
-  }
+  restoreFormValues(root.querySelector<HTMLFormElement>("#connection-form"), formText, "data-field");
+  restoreFormValues(root.querySelector<HTMLFormElement>("#new-key-form"), newKeyFormText, "data-nk-field");
+
   if (focusId) {
     const el = (focusId.startsWith("[") ? root.querySelector(focusId) : document.getElementById(focusId)) as HTMLInputElement | HTMLTextAreaElement | null;
     if (el && typeof el.focus === "function") {
@@ -236,17 +409,33 @@ function updateRenderedApp(html: string, promptState: { focused: boolean; select
         }
       }
     }
+  } else if (focusedKeyRow != null) {
+    Array.from(root.querySelectorAll<HTMLElement>(".key-row"))
+      .find((el) => el.dataset.key === focusedKeyRow)
+      ?.focus({ preventScroll: true });
+  } else if (focusedSampleRow != null) {
+    Array.from(root.querySelectorAll<HTMLElement>(".srow"))
+      .find((el) => el.dataset.sample === focusedSampleRow)
+      ?.focus({ preventScroll: true });
   }
   root.querySelector(".app")?.classList.remove("entering");
 }
 
-function readFormValues(form: Element | null): Map<string, string> {
+function readFormValues(form: Element | null, attr: string): Map<string, string> {
   const out = new Map<string, string>();
   if (!form) return out;
-  for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-field]"))) {
-    out.set(el.dataset.field ?? "", el.value);
+  for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(`[${attr}]`))) {
+    out.set(el.getAttribute(attr) ?? "", el.value);
   }
   return out;
+}
+
+function restoreFormValues(form: HTMLFormElement | null, values: Map<string, string>, attr: string) {
+  if (!form || !values.size) return;
+  for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(`[${attr}]`))) {
+    const value = values.get(el.getAttribute(attr) ?? "");
+    if (value != null && el.value !== value) el.value = value;
+  }
 }
 
 function pageBody(s: ViewState): string {
@@ -258,33 +447,54 @@ function pageBody(s: ViewState): string {
   }
 }
 
-function render() {
+function render(kind: ChangeKind = "full") {
   const s = state;
+  if (
+    kind === "metrics" &&
+    !firstPaint &&
+    (s.page === "browser" || s.page === "cli" || s.page === "settings") &&
+    !s.paletteOpen &&
+    !s.connectionEditor &&
+    !s.confirm &&
+    !ui.newKeyDraft &&
+    s.serviceAvailable
+  ) {
+    updateMetricsChrome(s);
+    return;
+  }
+
   const conn = currentConnection();
-  // While the connection form is open it owns the draft; the live fields are
-  // read straight back into it, so no action can overwrite what was typed.
   if (s.connectionEditor) readDraft();
   syncEditorDraft();
+  if (ui.newKeyDraft) readNewKeyDraft();
+  if (ui.newKeyDraft && (!conn || conn.readOnly)) ui.newKeyDraft = null;
+
   const hadPalette = Boolean(root.querySelector("#palette-input"));
-  // Preserve the scroll offset of the page container across re-renders.
+  const currentValKey = currentBrowserKeyId(s);
+  const sameValueKey = currentValKey === lastValueKeyId;
+  lastValueKeyId = currentValKey;
+
   const prevContent = root.querySelector<HTMLElement>(".content");
   if (prevContent && s.page) scrollMemo[`${s.page}:${s.connId}`] = prevContent.scrollTop;
   const prevLog = root.querySelector<HTMLElement>("#cli-log");
+  const prevLogAtBottom = prevLog ? prevLog.scrollHeight - prevLog.scrollTop - prevLog.clientHeight < 24 : true;
+  const prevLogCount = prevLog?.childElementCount ?? 0;
   if (prevLog) scrollMemo["cli"] = prevLog.scrollTop;
   const prevValue = root.querySelector<HTMLElement>(".value-body");
-  if (prevValue) scrollMemo["value"] = prevValue.scrollTop;
+  scrollMemo["value"] = sameValueKey && prevValue ? prevValue.scrollTop : 0;
+  const prevTbl = root.querySelector<HTMLElement>(".tbl-wrap");
+  scrollMemo["tbl"] = sameValueKey && prevTbl ? prevTbl.scrollTop : 0;
   const prevKeys = root.querySelector<HTMLElement>(".key-list");
   if (prevKeys) scrollMemo["keys"] = prevKeys.scrollTop;
   const prevWindowY = window.scrollY;
   const prevPrompt = root.querySelector<HTMLInputElement>("#cli-input");
 
   const prevPromptFocused = document.activeElement === prevPrompt;
-  const prevPromptSelection = prevPrompt ? { start: prevPrompt.selectionStart, end: prevPrompt.selectionEnd, direction: prevPrompt.selectionDirection } : null;
-  // The prompt is the source of truth for its draft at paint time; mirroring it
-  // into the session it belonged to keeps every rebuild faithful.
+  const prevPromptSelection = prevPrompt
+    ? { start: prevPrompt.selectionStart, end: prevPrompt.selectionEnd, direction: prevPrompt.selectionDirection }
+    : null;
   if (prevPrompt && !sessionSwitchPending) saveDraft();
   sessionSwitchPending = false;
-  draftSessionRef = activeCliSession();
 
   const html = `
     <div class="app${firstPaint ? " entering" : ""}">
@@ -295,6 +505,7 @@ function render() {
     <div class="app-overlays">
       <div data-overlay="palette">${palette(s, ui.paletteQuery, ui.paletteAction)}</div>
       <div data-overlay="editor">${s.connectionEditor ? connectionDialog(s, ui.draft!, ui.testResult) : ""}</div>
+      <div data-overlay="new-key">${newKeyDialog(ui.newKeyDraft)}</div>
       <div data-overlay="confirm">${confirmModal(s)}</div>
       <div data-overlay="toasts">${toasts(s)}</div>
     </div>`;
@@ -302,17 +513,19 @@ function render() {
   updateRenderedApp(html, { focused: prevPromptFocused, selection: prevPromptSelection });
   document.title = conn ? `Redis Manager — ${conn.name || conn.host}` : "Redis Manager";
 
-  // restore scrolls
   const content = root.querySelector<HTMLElement>(".content");
   const memoKey = `${s.page}:${s.connId}`;
   if (content && scrollMemo[memoKey] != null) content.scrollTop = scrollMemo[memoKey]!;
   const log = root.querySelector<HTMLElement>("#cli-log");
-  if (log) log.scrollTop = scrollMemo["cli"] ?? log.scrollHeight;
+  if (log) {
+    log.scrollTop = log.childElementCount > prevLogCount && prevLogAtBottom ? log.scrollHeight : (scrollMemo["cli"] ?? log.scrollHeight);
+  }
   const valueBody = root.querySelector<HTMLElement>(".value-body");
-  if (valueBody && scrollMemo["value"]) valueBody.scrollTop = scrollMemo["value"]!;
+  if (valueBody) valueBody.scrollTop = scrollMemo["value"] ?? 0;
+  const tblWrap = root.querySelector<HTMLElement>(".tbl-wrap");
+  if (tblWrap) tblWrap.scrollTop = scrollMemo["tbl"] ?? 0;
   const keyList = root.querySelector<HTMLElement>(".key-list");
   if (keyList && scrollMemo["keys"]) keyList.scrollTop = scrollMemo["keys"]!;
-  // Values can be long enough to scroll the host page; keep the reader's place.
   if (prevWindowY > 0 && window.scrollY !== prevWindowY) window.scrollTo(0, prevWindowY);
 
   bindCharts(root);
@@ -323,7 +536,6 @@ function render() {
 
 /** Head for the two global pages, which are not views of an instance. */
 function pageHead(s: ViewState): string {
-  const conn = currentConnection();
   if (s.page === "connections") {
     return `<div class="page-head"><h1>连接管理</h1><span class="sub">${s.connections.length} 个实例 · 按分组排列在左侧</span><span class="spacer"></span><button class="btn" data-action="refresh">${icon("refresh", 12)} 刷新</button><button class="btn primary" data-action="new-connection">${icon("plus", 12)} 新建连接</button></div>`;
   }
@@ -353,7 +565,7 @@ function updateThemeMeta() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Editor form helpers                                                 */
+/* Editor & New-Key form helpers                                       */
 /* ------------------------------------------------------------------ */
 
 function syncEditorDraft() {
@@ -366,7 +578,7 @@ function syncEditorDraft() {
 
 function readDraft(): EditorDraft {
   const draft: EditorDraft = { ...(ui.draft ?? editorDraft(state)) };
-  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-field]").forEach((el) => {
+  root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("#connection-form [data-field]").forEach((el) => {
     const name = el.dataset.field as keyof EditorDraft;
     const raw = el.value;
     if (name === "port" || name === "db") (draft as unknown as Record<string, unknown>)[name] = Number(raw) || 0;
@@ -376,9 +588,102 @@ function readDraft(): EditorDraft {
   return draft;
 }
 
-function draftConnection(draft: EditorDraft): EditorDraft {
-  const { password: _password, ...conn } = draft;
-  return { ...conn, port: conn.port || 6379, db: Number.isFinite(conn.db) ? conn.db : 0 } as EditorDraft;
+function draftConnection(draft: EditorDraft): Connection {
+  return {
+    id: draft.id,
+    name: draft.name,
+    group: draft.group,
+    host: draft.host,
+    port: draft.port || 6379,
+    db: Number.isFinite(draft.db) && draft.db >= 0 ? draft.db : 0,
+    mode: draft.mode,
+    username: draft.username ?? "",
+    tls: Boolean(draft.tls),
+    tlsSkipVerify: Boolean(draft.tls && draft.tlsSkipVerify),
+    readOnly: Boolean(draft.readOnly),
+    color: draft.color,
+    seedNodes: draft.seedNodes ?? "",
+    sentinelMaster: draft.sentinelMaster ?? "",
+  };
+}
+
+function readNewKeyDraft(): NewKeyDraft | null {
+  if (!ui.newKeyDraft) return null;
+  const draft: NewKeyDraft = { ...ui.newKeyDraft };
+  root.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("#new-key-form [data-nk-field]").forEach((el) => {
+    const name = el.dataset.nkField as keyof NewKeyDraft;
+    if (name === "type") draft.type = el.value === "hash" ? "hash" : "string";
+    else draft[name] = el.value;
+  });
+  ui.newKeyDraft = draft;
+  return draft;
+}
+
+async function onSaveNewKey() {
+  const conn = currentConnection();
+  if (!conn || conn.readOnly) return;
+  const draft = readNewKeyDraft();
+  if (!draft) return;
+  const key = draft.key.trim();
+  if (!key) {
+    toast("err", "请填写键名");
+    document.getElementById("nk-key")?.focus();
+    return;
+  }
+  if (draft.type === "hash" && !draft.field.trim()) {
+    toast("err", "请填写初始字段名");
+    document.getElementById("nk-field")?.focus();
+    return;
+  }
+  const ttlRaw = draft.ttl.trim();
+  let ttlSeconds: number | undefined;
+  if (ttlRaw !== "") {
+    const parsed = Math.floor(Number(ttlRaw));
+    if (!Number.isFinite(parsed) || parsed === 0 || parsed < -1) {
+      toast("err", "无效的 TTL", "请输入正整数秒数，或留空设为持久");
+      document.getElementById("nk-ttl")?.focus();
+      return;
+    }
+    if (parsed > 0) ttlSeconds = parsed;
+  }
+  const ok = await createNewKey({
+    key,
+    type: draft.type,
+    value: draft.value,
+    field: draft.type === "hash" ? draft.field.trim() : undefined,
+    ttlSeconds,
+  });
+  if (ok) {
+    ui.newKeyDraft = null;
+    render();
+  }
+}
+
+async function onSubmitTtl(form: HTMLFormElement) {
+  const conn = currentConnection();
+  if (!conn || conn.readOnly) return;
+  const raw = String(new FormData(form).get("ttl") ?? "").trim();
+  const ttlSeconds = raw === "" ? -1 : Math.floor(Number(raw));
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds === 0 || ttlSeconds < -1) {
+    toast("err", "无效的 TTL", "请输入正整数秒数，或 -1 设为持久");
+    return;
+  }
+  const ok = await saveKeyTtl(ttlSeconds);
+  if (ok) {
+    setTtlEditing(false);
+    render();
+  }
+}
+
+async function onSubmitString(form: HTMLFormElement) {
+  const conn = currentConnection();
+  if (!conn || conn.readOnly) return;
+  const value = String(new FormData(form).get("value") ?? "");
+  const ok = await saveStringValue(value);
+  if (ok) {
+    closeStringEditor();
+    render();
+  }
 }
 
 async function onTestConnection() {
@@ -400,7 +705,7 @@ async function onTestConnection() {
   ui.testResult = { kind: "info", text: "正在连接…" };
   render();
   try {
-    const result = await redis.testConnection(conn as never, draft.password ?? "");
+    const result = await redis.testConnection(conn, draft.password ?? "");
     if (state.connectionEditor !== editor || request !== testRequest) return;
     ui.testResult =
       result.status === "ok"
@@ -424,7 +729,7 @@ async function onSaveConnection() {
     render();
     return;
   }
-  const ok = await saveConnection(conn as never, draft.password ?? "");
+  const ok = await saveConnection(conn, draft.password ?? "");
   if (ok && state.connectionEditor === editor) {
     ui.draft = null;
     ui.testResult = null;
@@ -436,6 +741,33 @@ function openEditor(mode: "new" | "edit", id?: string) {
   ui.draft = null;
   ui.testResult = null;
   patch({ connectionEditor: { mode, id } });
+}
+
+function openCloneEditor(id: string) {
+  const src = state.connections.find((c) => c.id === id);
+  if (!src) return;
+  const editor = { mode: "new" as const };
+  ui.editor = editor;
+  ui.draft = {
+    id: `conn-${Date.now().toString(36)}`,
+    name: `${src.name || `${src.host}:${src.port}`} (副本)`,
+    group: src.group,
+    host: src.host,
+    port: src.port,
+    db: src.db,
+    mode: src.mode,
+    username: src.username ?? "",
+    tls: Boolean(src.tls),
+    tlsSkipVerify: Boolean(src.tlsSkipVerify),
+    readOnly: Boolean(src.readOnly),
+    color: src.color,
+    seedNodes: src.seedNodes ?? "",
+    sentinelMaster: src.sentinelMaster ?? "",
+    password: "",
+  };
+  ui.testResult = null;
+  testRequest += 1;
+  patch({ connectionEditor: editor });
 }
 
 /* ------------------------------------------------------------------ */
@@ -476,7 +808,7 @@ const actions: Record<string, () => void | Promise<void>> = {
   },
   "test-connection": () => onTestConnection(),
   "save-connection": () => onSaveConnection(),
-  "palette": () => openPalette(),
+  palette: () => openPalette(),
   "palette-close": () => closePalette(),
   "toggle-scheme": () => {
     const next: Scheme = settings.get("scheme") === "dark" ? "light" : "dark";
@@ -486,15 +818,81 @@ const actions: Record<string, () => void | Promise<void>> = {
   "go-cli": () => go("cli"),
   "scan-reset": () => scanKeys({ reset: true }),
   "scan-more": () => scanKeys({ append: true }),
+  "new-key": () => {
+    const conn = currentConnection();
+    if (!conn || conn.readOnly) return;
+    ui.newKeyDraft = { key: "", type: "string", field: "", value: "", ttl: "" };
+    render();
+    document.getElementById("nk-key")?.focus();
+  },
+  "new-key-close": () => {
+    if (!ui.newKeyDraft) return;
+    ui.newKeyDraft = null;
+    render();
+  },
+  "save-new-key": () => onSaveNewKey(),
   "reload-value": () => (state.selectedKey ? openKey(state.selectedKey) : undefined),
   "copy-key": () => {
     const key = state.value?.key ?? state.selectedKey;
     if (key) void copy(key);
   },
+  "copy-value": () => {
+    const v = state.value;
+    if (!v) return;
+    let text = "";
+    if (v.type === "string") text = v.stringValue ?? "";
+    else if (v.type === "hash") text = JSON.stringify(v.hash ?? {}, null, 2);
+    else if (v.type === "list") text = JSON.stringify(v.list ?? [], null, 2);
+    else if (v.type === "set") text = JSON.stringify(v.set ?? [], null, 2);
+    else if (v.type === "zset") text = JSON.stringify(v.zset ?? [], null, 2);
+    else if (v.type === "stream") text = JSON.stringify(v.stream ?? [], null, 2);
+    void copy(text);
+  },
+  "edit-ttl": () => {
+    const conn = currentConnection();
+    const v = state.value;
+    if (!conn || conn.readOnly || !v) return;
+    setTtlEditing(true, currentBrowserKeyId(state));
+    render();
+    const input = document.getElementById("ttl-input") as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  },
+  "cancel-ttl": () => {
+    setTtlEditing(false);
+    render();
+  },
+  "persist-ttl": async () => {
+    const conn = currentConnection();
+    if (!conn || conn.readOnly) return;
+    const ok = await saveKeyTtl(-1);
+    if (ok) {
+      setTtlEditing(false);
+      render();
+    }
+  },
+  "toggle-string-edit": () => {
+    const conn = currentConnection();
+    const v = state.value;
+    if (!conn || conn.readOnly || !v || v.type !== "string" || v.truncated) return;
+    const keyId = currentBrowserKeyId(state);
+    if (isStringEditing(keyId)) {
+      closeStringEditor();
+      render();
+      return;
+    }
+    openStringEditor(keyId, v.stringValue ?? "");
+    render();
+    document.getElementById("string-editor-input")?.focus();
+  },
+  "cancel-string-edit": () => {
+    closeStringEditor();
+    render();
+  },
   "delete-key": () => {
     const value = state.value;
     const conn = currentConnection();
-    if (!value || !conn) return;
+    if (!value || !conn || conn.readOnly) return;
     const target = { connId: conn.id, db: currentDb(conn), key: value.key };
     confirmDialog({
       title: "删除键",
@@ -581,8 +979,9 @@ document.addEventListener("click", (event) => {
     if (kind === "nav") go(payload as PageId);
     else if (kind === "conn") void selectConnection(payload);
     else if (kind === "key") {
+      cancelKeyRove();
       go("browser");
-      void openKey(payload.replace("key:", ""));
+      void openKey(payload);
     } else if (kind === "cmd") {
       go("cli");
       void runCli(payload);
@@ -606,9 +1005,16 @@ document.addEventListener("click", (event) => {
     void selectConnection(connectBtn.dataset.connect);
     return;
   }
-  const keyRow = closest<HTMLElement>(target, "[data-key]");
+  const keyRow = closest<HTMLElement>(target, ".key-row[data-key]");
   if (keyRow?.dataset.key) {
+    cancelKeyRove();
     void openKey(keyRow.dataset.key);
+    return;
+  }
+  const expandBtn = closest<HTMLElement>(target, "[data-expand-cell]");
+  if (expandBtn?.dataset.expandCell) {
+    toggleExpandedCell(expandBtn.dataset.expandCell);
+    render();
     return;
   }
   const group = closest<HTMLElement>(target, "[data-group]");
@@ -626,12 +1032,14 @@ document.addEventListener("click", (event) => {
   const segValue = closest<HTMLElement>(target, "[data-seg-action]");
   if (segValue?.dataset.segAction === "view-mode") {
     const mode = segValue.dataset.segValue as ViewState["valueMode"];
-    if (["raw", "json", "hex", "html", "markdown"].includes(mode)) patch({ valueMode: mode });
+    if (["raw", "json", "hex", "html", "markdown"].includes(mode)) {
+      if (isStringEditing()) closeStringEditor();
+      patch({ valueMode: mode });
+    }
     return;
   }
-  const windowBtn = closest<HTMLElement>(target, "[data-seg-action]");
-  if (windowBtn?.dataset.segAction === "window" && windowBtn.dataset.segValue) {
-    ui.windowSize = windowBtn.dataset.segValue;
+  if (segValue?.dataset.segAction === "window" && segValue.dataset.segValue) {
+    ui.windowSize = segValue.dataset.segValue;
     setWindowSize(state, ui.windowSize);
     render();
     return;
@@ -641,13 +1049,18 @@ document.addEventListener("click", (event) => {
     selectSample(Number(sampleRow.dataset.sample));
     return;
   }
+  const cliClose = closest<HTMLElement>(target, "[data-cli-close]");
+  if (cliClose?.dataset.cliClose != null) {
+    saveDraft();
+    sessionSwitchPending = true;
+    closeCliSession(Number(cliClose.dataset.cliClose));
+    return;
+  }
   const cliSession = closest<HTMLElement>(target, "[data-session-tab]");
   if (cliSession?.dataset.sessionTab != null) {
     sessionSwitchPending = true;
     const conn = currentConnection();
     if (conn) {
-      // Switching views another session; the painter mirrors the outgoing
-      // prompt into the outgoing session before the new one is drawn.
       state.cliActive[conn.id] = Number(cliSession.dataset.sessionTab);
       notify();
     }
@@ -655,19 +1068,17 @@ document.addEventListener("click", (event) => {
   }
   const cliMode = closest<HTMLElement>(target, "[data-cli-mode]");
   if (cliMode?.dataset.cliMode) {
+    if ((cliMode as HTMLButtonElement).disabled || (cliMode.dataset.cliMode === "write" && currentConnection()?.readOnly)) return;
     setCliReadOnly(cliMode.dataset.cliMode === "readonly");
     return;
   }
   if (closest(target, "[data-cli-new]")) {
-    // Record the outgoing session's draft first, then open an empty one.
     saveDraft();
     addCliSession();
     return;
   }
   const swatch = closest<HTMLElement>(target, "[data-color-pick]");
   if (swatch) {
-    // The picker writes into the draft and repaints only the picker: the rest
-    // of the dialog keeps its values through readDraft().
     readDraft();
     if (ui.draft) ui.draft.color = swatch.dataset.colorPick || undefined;
     render();
@@ -680,19 +1091,22 @@ document.addEventListener("click", (event) => {
     if (input) {
       input.value = fill.dataset.fill;
       input.focus();
-      // A filled suggestion is a draft like any other: it must survive the
-      // next paint, which renders the prompt from the session.
       saveDraft();
     }
     return;
   }
-  const formToggle = closest<HTMLElement>(target, "[data-form-toggle]");
+  const formToggle =
+    closest<HTMLElement>(target, "[data-form-toggle]") ??
+    closest<HTMLElement>(target, ".toggle-field")?.querySelector<HTMLElement>("[data-form-toggle]") ??
+    null;
   if (formToggle) {
-    const key = formToggle.dataset.formToggle as "tls" | "readOnly";
+    const key = formToggle.dataset.formToggle as "tls" | "tlsSkipVerify" | "readOnly";
     readDraft();
-    if (ui.draft) ui.draft[key] = !ui.draft[key];
-    formToggle.classList.toggle("on", Boolean(ui.draft?.[key]));
-    formToggle.setAttribute("aria-checked", String(Boolean(ui.draft?.[key])));
+    if (ui.draft) {
+      ui.draft[key] = !ui.draft[key];
+      if (key === "tls" && !ui.draft.tls) ui.draft.tlsSkipVerify = false;
+    }
+    render();
     return;
   }
   if (closest(target, "#cli-clear")) {
@@ -701,9 +1115,6 @@ document.addEventListener("click", (event) => {
   }
 
   // generic actions
-  // A dialog scrim owns the close action, but clicks inside its data-stop
-  // panel must not resolve that ancestor as the clicked action. Keep actions
-  // rendered inside the stopped panel available for buttons such as Save.
   const stopEl = closest<HTMLElement>(target, "[data-stop]");
   const candidateAction = closest<HTMLElement>(target, "[data-action]");
   const actionEl = candidateAction && (!stopEl || stopEl.contains(candidateAction)) ? candidateAction : null;
@@ -711,6 +1122,10 @@ document.addEventListener("click", (event) => {
     const action = actionEl.dataset.action ?? "";
     if (action === "edit-connection") {
       openEditor("edit", actionEl.dataset.id);
+      return;
+    }
+    if (action === "clone-connection" && actionEl.dataset.id) {
+      openCloneEditor(actionEl.dataset.id);
       return;
     }
     if (action === "delete-connection" && actionEl.dataset.id) {
@@ -722,8 +1137,22 @@ document.addEventListener("click", (event) => {
       if (conn) void testConnection(conn);
       return;
     }
-    if (action === "copy" && actionEl.dataset.copy) {
+    if (action === "copy" && actionEl.dataset.copy != null) {
       void copy(actionEl.dataset.copy);
+      return;
+    }
+    if (action === "delete-hash-field" && actionEl.dataset.field != null) {
+      const field = actionEl.dataset.field;
+      const conn = currentConnection();
+      const v = state.value;
+      if (!conn || conn.readOnly || !v) return;
+      confirmDialog({
+        title: "删除 Hash 字段",
+        body: `确认从 ${v.key} 中删除字段「${field}」？此操作不可恢复。`,
+        confirmLabel: "删除字段",
+        danger: true,
+        onConfirm: () => void removeHashField(field),
+      });
       return;
     }
     const fn = actions[action];
@@ -731,9 +1160,7 @@ document.addEventListener("click", (event) => {
       void fn();
       return;
     }
-    // scrim click handlers (palette / theme menu / dialogs) close when the
-    // click lands outside the inner panel.
-    if (action === "palette-close" || action === "editor-close" || action === "confirm-cancel") {
+    if (action === "palette-close" || action === "editor-close" || action === "confirm-cancel" || action === "new-key-close") {
       return;
     }
   }
@@ -742,19 +1169,30 @@ document.addEventListener("click", (event) => {
   const scrim = target.classList?.contains("scrim") ? target : target.classList?.contains("dialog-scrim") ? target : null;
   if (scrim) {
     if (state.paletteOpen) closePalette();
- else if (state.confirm) patch({ confirm: null });
+    else if (state.confirm) patch({ confirm: null });
     else if (state.connectionEditor) {
       ui.draft = null;
       ui.testResult = null;
       patch({ connectionEditor: null });
+    } else if (ui.newKeyDraft) {
+      ui.newKeyDraft = null;
+      render();
     }
   }
 });
 
 document.addEventListener("input", (event) => {
-  const target = event.target as HTMLInputElement;
+  const target = event.target as HTMLInputElement | HTMLTextAreaElement;
   if (target.matches("#connection-form [data-field]")) {
     readDraft();
+    return;
+  }
+  if (target.matches("#new-key-form [data-nk-field]")) {
+    readNewKeyDraft();
+    return;
+  }
+  if (target.id === "string-editor-input") {
+    updateStringDraft(target.value);
     return;
   }
   if (target.form?.id === "hash-form") {
@@ -769,8 +1207,6 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (target.id === "cli-input") {
-    // The draft lives in the session so a rebuild (polling, dialogs, scheme)
-    // renders the same draft back instead of an empty prompt.
     const session = activeCliSession();
     if (session) session.input = target.value;
     return;
@@ -783,12 +1219,10 @@ document.addEventListener("input", (event) => {
     state.keyQuery = target.value;
     const list = root.querySelector(".key-list");
     if (list) {
-      // Cheap re-render of only the key list.
       const view = browserView({ ...state, keyQuery: target.value } as ViewState);
-      const temp = document.createElement("div");
-      temp.innerHTML = view;
+      const temp = parseCleanFragment(view);
       const fresh = temp.querySelector(".key-list");
-      if (fresh) list.innerHTML = fresh.innerHTML;
+      if (fresh) list.replaceChildren(...Array.from(fresh.childNodes));
     }
   }
 });
@@ -799,6 +1233,11 @@ document.addEventListener("change", (event) => {
   if (target.matches("#connection-form [data-field]")) {
     readDraft();
     if (target.dataset.field === "mode") render();
+    return;
+  }
+  if (target.matches("#new-key-form [data-nk-field]")) {
+    readNewKeyDraft();
+    if (target.dataset.nkField === "type") render();
     return;
   }
   if (target.dataset.connectionSelect != null) {
@@ -824,8 +1263,6 @@ document.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
   event.preventDefault();
   if (form.id === "cli-form") {
-    // The live element, not getElementById: form submission can race a
-    // re-render, and the submitted form is the authoritative node here.
     const input = form.querySelector<HTMLInputElement>("#cli-input");
     if (!input?.value.trim()) return;
     const value = input.value;
@@ -835,6 +1272,7 @@ document.addEventListener("submit", (event) => {
     return;
   }
   if (form.id === "hash-form") {
+    if (currentConnection()?.readOnly) return;
     const data = new FormData(form);
     const field = String(data.get("field") ?? "").trim();
     const value = String(data.get("value") ?? "");
@@ -847,17 +1285,25 @@ document.addEventListener("submit", (event) => {
     });
     return;
   }
+  if (form.id === "ttl-form") {
+    void onSubmitTtl(form);
+    return;
+  }
+  if (form.id === "string-form") {
+    void onSubmitString(form);
+    return;
+  }
+  if (form.id === "new-key-form") {
+    void onSaveNewKey();
+    return;
+  }
   if (form.id === "connection-form") {
     void onSaveConnection();
   }
 });
 
-
-
 document.addEventListener("keydown", (event) => {
   const mod = event.metaKey || event.ctrlKey;
-  // Keyboard events may target the document (programmatic dispatch, some
-  // webviews), where `Element.matches` does not exist.
   const target = (event.target instanceof HTMLElement ? event.target : null) as HTMLElement | null;
   const typing = Boolean(target?.matches("input, textarea, select") || target?.isContentEditable);
 
@@ -865,8 +1311,33 @@ document.addEventListener("keydown", (event) => {
     if (state.paletteOpen) return void closePalette();
     if (state.confirm) return void patch({ confirm: null });
     if (state.connectionEditor) return void actions["editor-close"]!();
+    if (ui.newKeyDraft) return void actions["new-key-close"]!();
+    if (isTtlEditing()) {
+      setTtlEditing(false);
+      render();
+      return;
+    }
+    if (isStringEditing()) {
+      closeStringEditor();
+      render();
+      return;
+    }
     return;
   }
+
+  if (mod && event.key.toLowerCase() === "s" && target?.id === "string-editor-input") {
+    event.preventDefault();
+    const form = target.closest<HTMLFormElement>("#string-form");
+    if (form) void onSubmitString(form);
+    return;
+  }
+
+  if ((event.key === " " || event.key === "Enter") && target?.hasAttribute("data-form-toggle")) {
+    event.preventDefault();
+    target.click();
+    return;
+  }
+
   if (mod && event.key.toLowerCase() === "k") {
     event.preventDefault();
     return void openPalette();
@@ -882,6 +1353,9 @@ document.addEventListener("keydown", (event) => {
   }
   if (mod && event.key.toLowerCase() === "r") {
     event.preventDefault();
+    if (state.page === "monitor") return void loadMonitor();
+    if (state.page === "browser") return void scanKeys({ reset: true });
+    if (state.page === "connections") return void refreshConnections();
     return void loadOverview();
   }
   if (mod && event.key.toLowerCase() === "l") {
@@ -940,6 +1414,7 @@ document.addEventListener("keydown", (event) => {
       if (candidate) {
         words[words.length - 1] = candidate;
         input.value = `${words.join(" ")} `;
+        if (session) session.input = input.value;
       }
       return;
     }
@@ -956,17 +1431,41 @@ document.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") delete (target as HTMLInputElement).dataset.hist;
   }
 
-  // Lists are keyboard-navigable: ↑/↓ roves the selection in the key list and
-  // the sample stream, so a 45-row stream never costs 45 tab stops.
-  const roving = target?.closest<HTMLElement>(".key-row") ? ".key-row" : target?.closest<HTMLElement>(".srow") ? ".srow" : null;
-  if (roving && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+  // Keyboard roving in key list and sample stream (single listener; `.key-row`
+  // debounces remote `GetValue` by 90ms so holding ↑/↓ stays responsive).
+  const row = target?.closest<HTMLElement>(".key-row, .srow") ?? null;
+  if (row && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
     event.preventDefault();
-    const rows = Array.from(root.querySelectorAll<HTMLElement>(roving));
-    const index = rows.indexOf(target as HTMLElement);
+    const isKeyRow = row.classList.contains("key-row");
+    const selector = isKeyRow ? ".key-row" : ".srow";
+    const rows = Array.from(root.querySelectorAll<HTMLElement>(selector));
+    const index = rows.indexOf(row);
+    if (index < 0) return;
     const next = rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))];
-    if (next) {
-      next.focus({ preventScroll: false });
-      next.click();
+    if (!next || next === row) return;
+    next.focus({ preventScroll: false });
+    if (isKeyRow) {
+      const nextKey = next.dataset.key;
+      if (nextKey) {
+        rows.forEach((el) => {
+          const active = el === next;
+          el.classList.toggle("active", active);
+          el.tabIndex = active ? 0 : -1;
+          el.setAttribute("aria-current", String(active));
+        });
+        selectKey(nextKey);
+        const roveConn = state.connId;
+        const roveDb = currentDb();
+        cancelKeyRove();
+        keyRoveTimer = window.setTimeout(() => {
+          keyRoveTimer = null;
+          if (state.page === "browser" && state.connId === roveConn && currentDb() === roveDb && state.selectedKey === nextKey) {
+            void openKey(nextKey);
+          }
+        }, 90);
+      }
+    } else if (next.dataset.sample != null) {
+      selectSample(Number(next.dataset.sample));
     }
     return;
   }
@@ -974,41 +1473,19 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && target?.id === "key-pattern") {
     event.preventDefault();
     void scanKeys({ reset: true });
+    return;
   }
   if (typing) return;
-});
-
-/**
- * Arrow keys drive the focused list row without re-binding a handler: the
- * click that follows already routes through the normal selection path.
- */
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-  const row = (event.target as HTMLElement | null)?.closest?.(".key-row, .srow") as HTMLElement | null;
-  if (!row) return;
-  event.preventDefault();
-  const selector = row.classList.contains("key-row") ? ".key-row" : ".srow";
-  const rows = Array.from(root.querySelectorAll<HTMLElement>(selector));
-  const next = rows[Math.max(0, Math.min(rows.length - 1, rows.indexOf(row) + (event.key === "ArrowDown" ? 1 : -1)))];
-  if (next) {
-    next.focus({ preventScroll: false });
-    next.click();
-  }
 });
 
 const COMMANDS = [
   "APPEND", "AUTH", "BGSAVE", "CLIENT", "CLUSTER", "COMMAND", "CONFIG", "DBSIZE", "DEBUG", "DEL", "EXISTS",
   "EXPIRE", "FLUSHALL", "FLUSHDB", "GET", "HDEL", "HGET", "HGETALL", "HLEN", "HSET", "INFO", "KEYS", "LLEN",
   "LPUSH", "LRANGE", "MEMORY", "MONITOR", "MSET", "OBJECT", "PERSIST", "PING", "PTTL", "RPOP", "RPUSH", "SADD",
-  "SCAN", "SCARD", "SCAN", "SELECT", "SET", "SETEX", "SLOWLOG", "SMEMBERS", "SREM", "STRLEN", "TIME", "TTL",
+  "SCAN", "SCARD", "SELECT", "SET", "SETEX", "SLOWLOG", "SMEMBERS", "SREM", "STRLEN", "TIME", "TTL",
   "TYPE", "UNLINK", "XADD", "XLEN", "XRANGE", "ZADD", "ZCARD", "ZRANGE", "ZREM",
 ];
 
-/**
- * History navigation owns the draft while it is active: the recalled command
- * becomes the session's draft (so a repaint keeps it) and the cursor position
- * in the history travels with it.
- */
 /**
  * The prompt is the live editing surface and owns its draft: every place that
  * can replace or lose the node calls this first, writing into the session the
@@ -1038,7 +1515,7 @@ settings.subscribe((_, changed) => {
   else notify();
 });
 
-onChange(() => render());
+onChange((kind) => render(kind));
 
 async function boot() {
   window.__RM_BOOTED__ = (window.__RM_BOOTED__ ?? []).concat(["boot"]);
@@ -1050,18 +1527,14 @@ async function boot() {
   void loadAppInfo();
   void loadCredentialStorage();
   await refreshConnections();
-  // The screenshot fixture seeds a short history so charts read like a session
-  // that has been open for a while; the real app never sets this.
   const seed = (window as unknown as { __RM_PREVIEW_SEED__?: MetricSample[] }).__RM_PREVIEW_SEED__;
   if (Array.isArray(seed) && seed.length && !(window as unknown as { __RM_SEEDED__?: boolean }).__RM_SEEDED__) {
     (window as unknown as { __RM_SEEDED__?: boolean }).__RM_SEEDED__ = true;
-    // Keyed by the selected instance: loadOverview replaces its own entry.
     if (state.connId) state.history[state.connId] = seed;
     notify();
   }
   const params = new URLSearchParams(location.search);
   setWindowSize(state, ui.windowSize);
-  // Preview deep links (used by scripts/shoot-all.mjs) may force a theme.
   const schemeParam = params.get("scheme");
   if (isScheme(schemeParam)) settings.patch({ scheme: schemeParam });
   const page = params.get("page") as PageId | null;
@@ -1097,4 +1570,3 @@ window.__RM_STATE__ = state;
 window.__RM_SETTINGS__ = settings;
 
 void boot();
-

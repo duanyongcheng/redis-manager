@@ -97,6 +97,7 @@ export interface LineChartOptions {
   height?: number;
   yTicks?: number;
   xLabels?: string[];
+  pointLabels?: string[];
   showLegend?: boolean;
   legendExtra?: string;
   /** Index in the series to mark (an event onset or the inspected sample). */
@@ -227,7 +228,9 @@ export function lineChart(options: LineChartOptions): string {
       <circle class="chart-marker-dot ${tone}" cx="${mx}" cy="${padT + 3}" r="2.4"/>`;
   }
 
-  return `<div class="chart" data-crosshair data-points="${n}" data-labels="${escapeXml(xLabels.join("|"))}">
+  const tipLabels = options.pointLabels && options.pointLabels.length ? options.pointLabels : xLabels;
+
+  return `<div class="chart" data-crosshair data-points="${n}" data-labels="${escapeXml(tipLabels.join("|"))}" data-series="${escapeXml(series.map((s) => s.name).join("|"))}">
     <svg class="chart-svg" viewBox="0 0 ${w} ${h}" style="height:${svgHeight}px" role="img">
       ${grid}${labels}
       <line class="chart-cross" x1="${padL}" x2="${padL}" y1="${padT}" y2="${h - padB}" visibility="hidden" vector-effect="non-scaling-stroke"/>
@@ -251,7 +254,7 @@ function fmtTick(v: number): string {
 }
 
 function escapeXml(value: string): string {
-  return value.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch] ?? ch);
+  return value.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch] ?? ch);
 }
 
 /** Detaches the hover controller once after a render pass. */
@@ -263,7 +266,8 @@ export function bindCharts(root: ParentNode) {
     const tip = el.querySelector<HTMLElement>(".chart-tip");
     if (!svg || !hit || !cross || !tip) return;
     const points = Number(el.dataset.points || 0);
-    const labels = (el.dataset.labels || "").split("|");
+    const rawLabels = el.dataset.labels ? el.dataset.labels.split("|") : [];
+    const seriesNames = el.dataset.series ? el.dataset.series.split("|") : [];
     const names = Array.from(el.querySelectorAll<HTMLElement>(".legend-item")).map((n) => n.textContent?.trim() ?? "");
     const lines = Array.from(el.querySelectorAll<SVGPathElement>(".chart-line"));
     const vb = svg.viewBox.baseVal;
@@ -280,8 +284,9 @@ export function bindCharts(root: ParentNode) {
       cross.setAttribute("x2", String(xx));
       cross.setAttribute("visibility", "visible");
       tip.hidden = false;
-      tip.innerHTML = `<div class="tip-title">${labels[i] ?? `#${i + 1}`}</div>${lines
-        .map((line, li) => `<div class="tip-row"><i class="legend-swatch legend-${li}"></i><span>${names[li] ?? ""}</span><b>${sampleAt(line, points, i)}</b></div>`)
+      const title = rawLabels.length === points && rawLabels[i] ? escapeXml(rawLabels[i]!) : `#${i + 1}`;
+      tip.innerHTML = `<div class="tip-title">${title}</div>${lines
+        .map((line, li) => `<div class="tip-row"><i class="legend-swatch legend-${li}"></i><span>${escapeXml(seriesNames[li] || names[li] || "")}</span><b>${sampleAt(line, points, i)}</b></div>`)
         .join("")}`;
       const box = el.getBoundingClientRect();
       const left = (xx / vb.width) * box.width;

@@ -16,6 +16,7 @@ import { settings } from "../theme/settings";
 export type PageId = "overview" | "browser" | "cli" | "monitor" | "connections" | "settings";
 export type ConnStatus = "on" | "warn" | "off";
 export type ValueViewMode = "raw" | "json" | "hex" | "html" | "markdown";
+export type ChangeKind = "full" | "metrics";
 
 export interface ConnectionView extends Connection {
   status: ConnStatus;
@@ -26,6 +27,7 @@ export interface ConnectionView extends Connection {
 
 export interface MetricSample {
   at: number;
+  intervalMs?: number;
   /** True for samples carried backwards from the first real reading. */
   inferred?: boolean;
   ops: number;
@@ -179,9 +181,10 @@ export const state: ViewState = {
   toasts: [],
 };
 
-type Listener = () => void;
+type Listener = (kind: ChangeKind) => void;
 const listeners = new Set<Listener>();
 let scheduled = false;
+let pendingKind: ChangeKind | null = null;
 
 export function onChange(listener: Listener): () => void {
   listeners.add(listener);
@@ -189,12 +192,17 @@ export function onChange(listener: Listener): () => void {
 }
 
 /** Batches every mutation from one tick into a single re-render. */
-export function notify() {
+export function notify(kind: ChangeKind = "full") {
+  if (pendingKind === null || kind === "full") {
+    pendingKind = kind;
+  }
   if (scheduled) return;
   scheduled = true;
   queueMicrotask(() => {
     scheduled = false;
-    for (const listener of listeners) listener();
+    const flushed: ChangeKind = pendingKind ?? "full";
+    pendingKind = null;
+    for (const listener of listeners) listener(flushed);
   });
 }
 
@@ -239,7 +247,7 @@ function isCurrentDatabase(connId: string, db: number, version: number): boolean
   return browserContextVersion === version && currentConnection()?.id === connId && currentDb() === db;
 }
 
-function selectKey(key: string | null) {
+export function selectKey(key: string | null) {
   if (state.selectedKey === key) return;
   keySelectionVersion += 1;
   valueRequestVersion += 1;
@@ -329,6 +337,27 @@ export function addCliSession() {
   notify();
 }
 
+export function closeCliSession(index: number): void {
+  const conn = currentConnection();
+  if (!conn) return;
+  const list = cliSessionsFor(conn);
+  if (list.length <= 1) {
+    if (list[0]) {
+      list[0].lines = [];
+      list[0].input = "";
+    }
+    state.cliActive[conn.id] = 0;
+    notify();
+    return;
+  }
+  if (index < 0 || index >= list.length) return;
+  const prevActive = state.cliActive[conn.id] ?? 0;
+  list.splice(index, 1);
+  const nextActive = prevActive > index ? prevActive - 1 : Math.min(prevActive, list.length - 1);
+  state.cliActive[conn.id] = Math.max(0, nextActive);
+  notify();
+}
+
 export function go(page: PageId) {
   state.page = page;
   if (state.connId) state.pageByConn[state.connId] = page;
@@ -350,6 +379,12 @@ export function go(page: PageId) {
  * invented noise: the UI labels it and draws it differently, so nothing
  * fabricated can be mistaken for a measurement.
  */
+export function sampleNetKbps(sample: MetricSample | null | undefined): { inKBps: number; outKBps: number } {
+  if (!sample || sample.inferred) return { inKBps: 0, outKBps: 0 };
+  const sec = Math.max(0.25, (sample.intervalMs ?? 4000) / 1000);
+  return { inKBps: sample.netIn / sec / 1024, outKBps: sample.netOut / sec / 1024 };
+}
+
 export function windowedHistory(hist: MetricSample[], size: number): { samples: MetricSample[]; inferred: number } {
   if (!hist.length || hist.length >= size) return { samples: hist, inferred: 0 };
   const last = hist[hist.length - 1]!;
@@ -496,9 +531,10 @@ export async function refreshConnections(): Promise<void> {
   if (currentConnection()) await loadOverview();
 }
 
-function pushSample(connId: string, overview: OverviewSnapshot, netIn: number, netOut: number) {
+function pushSample(connId: string, overview: OverviewSnapshot, netIn: number, netOut: number, intervalMs = 4000) {
   const sample: MetricSample = {
     at: overview.atMs || Date.now(),
+    intervalMs,
     ops: overview.opsPerSec,
     clients: overview.connectedClients,
     used: overview.usedMemoryBytes,
@@ -508,6 +544,22 @@ function pushSample(connId: string, overview: OverviewSnapshot, netIn: number, n
   };
   const list = [...(state.history[connId] ?? []), sample];
   state.history[connId] = list.slice(-HISTORY_LIMIT);
+}
+
+function recordOverview(connId: string, overview: OverviewSnapshot) {
+  const prev = state.overview[connId];
+  const prevAt = prev?.atMs;
+  const prevInfo = prev?.info;
+  let netIn = 0;
+  let netOut = 0;
+  let intervalMs = 4000;
+  if (prevAt && overview.atMs - prevAt > 0 && overview.atMs - prevAt <= 60_000) {
+    intervalMs = Math.max(250, overview.atMs - prevAt);
+    netIn = diff(overview.info["total_net_input_bytes"], prevInfo?.["total_net_input_bytes"]);
+    netOut = diff(overview.info["total_net_output_bytes"], prevInfo?.["total_net_output_bytes"]);
+  }
+  state.overview[connId] = overview;
+  pushSample(connId, overview, netIn, netOut, intervalMs);
 }
 
 export function loadOverview(): Promise<void> {
@@ -525,20 +577,22 @@ export function loadOverview(): Promise<void> {
 }
 
 async function loadOverviewRequest(conn: ConnectionView, db: number, version: number, requestKey: string): Promise<void> {
+  let kind: ChangeKind = "full";
   try {
     const overview = await redis.getOverview(conn.id, db);
     if (!isCurrentDatabase(conn.id, db, version)) return;
-    const prevInfo = state.overview[conn.id]?.info;
-    const netIn = diff(overview.info["total_net_input_bytes"], prevInfo?.["total_net_input_bytes"]);
-    const netOut = diff(overview.info["total_net_output_bytes"], prevInfo?.["total_net_output_bytes"]);
-    state.overview[conn.id] = overview;
-    pushSample(conn.id, overview, netIn, netOut);
+    const prevConn = state.connections.find((c) => c.id === conn.id) ?? conn;
+    const wasOn = prevConn.status === "on";
+    recordOverview(conn.id, overview);
     updateConn(conn.id, {
       status: "on",
-      version: overview.info["redis_version"] ?? conn.version,
+      version: overview.info["redis_version"] ?? prevConn.version,
       latencyMs: overview.latencyMs,
       error: undefined,
     });
+    if (state.page !== "overview" && state.page !== "monitor" && wasOn) {
+      kind = "metrics";
+    }
     if (state.credentialKeychainPending > 0) void loadCredentialStorage();
   } catch (error) {
     if (!isCurrentDatabase(conn.id, db, version)) return;
@@ -547,7 +601,7 @@ async function loadOverviewRequest(conn: ConnectionView, db: number, version: nu
   } finally {
     overviewRequests.delete(requestKey);
   }
-  notify();
+  notify(kind);
 }
 
 function diff(next: string | undefined, prev: string | undefined): number {
@@ -572,10 +626,9 @@ export async function loadMonitor(): Promise<void> {
     const snapshot = await redis.getMonitorSnapshot(conn.id, db);
     if (!isCurrent()) return;
     state.monitor[conn.id] = snapshot;
-    const prevInfo = state.overview[conn.id]?.info;
-    state.overview[conn.id] = snapshot.overview;
-    pushSample(conn.id, snapshot.overview, diff(snapshot.overview.info["total_net_input_bytes"], prevInfo?.["total_net_input_bytes"]), diff(snapshot.overview.info["total_net_output_bytes"], prevInfo?.["total_net_output_bytes"]));
-    updateConn(conn.id, { status: "on", version: snapshot.overview.info["redis_version"] ?? conn.version, latencyMs: snapshot.overview.latencyMs });
+    const prevConn = state.connections.find((c) => c.id === conn.id) ?? conn;
+    recordOverview(conn.id, snapshot.overview);
+    updateConn(conn.id, { status: "on", version: snapshot.overview.info["redis_version"] ?? prevConn.version, latencyMs: snapshot.overview.latencyMs, error: undefined });
   } catch (error) {
     if (!isCurrent()) return;
     updateConn(conn.id, { status: "off", error: errorMessage(error) });
@@ -712,6 +765,11 @@ export async function deleteSelectedKey(target?: KeyTarget): Promise<void> {
   const value = state.value;
   const selected = target ?? (conn && value ? { connId: conn.id, db: currentDb(conn), key: value.key } : null);
   if (!selected || !api.available) return;
+  const targetConn = state.connections.find((c) => c.id === selected.connId) ?? (conn?.id === selected.connId ? conn : null);
+  if (targetConn?.readOnly) {
+    toast("err", "只读连接", "当前连接为只读模式，不允许修改或删除数据");
+    return;
+  }
   const { connId, db, key } = selected;
   const version = browserContextVersion;
   try {
@@ -730,8 +788,13 @@ export async function deleteSelectedKey(target?: KeyTarget): Promise<void> {
 
 export async function saveHashField(field: string, value: string): Promise<boolean> {
   const conn = currentConnection();
+  if (!conn) return false;
+  if (conn.readOnly) {
+    toast("err", "只读连接", "当前连接为只读模式，不允许修改或删除数据");
+    return false;
+  }
   const current = state.value;
-  if (!conn || !current || current.type !== "hash" || state.selectedKey !== current.key || !api.available) return false;
+  if (!current || current.type !== "hash" || state.selectedKey !== current.key || !api.available) return false;
   const db = currentDb(conn);
   const version = browserContextVersion;
   const selection = keySelectionVersion;
@@ -741,13 +804,189 @@ export async function saveHashField(field: string, value: string): Promise<boole
       valueRequestVersion += 1;
       state.valueLoading = false;
       state.valueError = "";
-      state.value = { ...state.value, hash: { ...(state.value.hash ?? {}), [field]: value } };
+      const prevHash = state.value.hash ?? {};
+      const isNewField = !Object.prototype.hasOwnProperty.call(prevHash, field);
+      state.value = {
+        ...state.value,
+        hash: { ...prevHash, [field]: value },
+        ...(state.value.totalCount != null ? { totalCount: state.value.totalCount + (isNewField ? 1 : 0) } : {}),
+      };
       notify();
     }
     toast("ok", "字段已写入", `${current.key} · ${field}`);
     return true;
   } catch (error) {
     toast("err", "写入失败", errorMessage(error));
+    return false;
+  }
+}
+
+export async function removeHashField(field: string): Promise<boolean> {
+  const conn = currentConnection();
+  if (!conn) return false;
+  if (conn.readOnly) {
+    toast("err", "只读连接", "当前连接为只读模式，不允许修改或删除数据");
+    return false;
+  }
+  const current = state.value;
+  if (!current || current.type !== "hash" || state.selectedKey !== current.key || !field || !api.available) return false;
+  const db = currentDb(conn);
+  const version = browserContextVersion;
+  const selection = keySelectionVersion;
+  const key = current.key;
+  try {
+    await redis.hashDelete(conn.id, db, key, field);
+    if (isCurrentDatabase(conn.id, db, version) && selection === keySelectionVersion && state.selectedKey === key && state.value?.key === key && state.value.type === "hash") {
+      valueRequestVersion += 1;
+      state.valueLoading = false;
+      state.valueError = "";
+      const nextHash = { ...(state.value.hash ?? {}) };
+      delete nextHash[field];
+      state.value = {
+        ...state.value,
+        hash: nextHash,
+        totalCount: Math.max(0, (state.value.totalCount ?? Object.keys(nextHash).length + 1) - 1),
+      };
+      notify();
+    }
+    toast("ok", "字段已删除", `${key} · ${field}`);
+    return true;
+  } catch (error) {
+    toast("err", "删除字段失败", errorMessage(error));
+    return false;
+  }
+}
+
+export async function saveKeyTtl(ttlSeconds: number): Promise<boolean> {
+  const conn = currentConnection();
+  if (!conn) return false;
+  if (conn.readOnly) {
+    toast("err", "只读连接", "当前连接为只读模式，不允许修改或删除数据");
+    return false;
+  }
+  const current = state.value;
+  if (!current || state.selectedKey !== current.key || !api.available || !Number.isFinite(ttlSeconds)) return false;
+  const db = currentDb(conn);
+  const version = browserContextVersion;
+  const selection = keySelectionVersion;
+  const key = current.key;
+  const truncatedTtl = Math.trunc(ttlSeconds);
+  try {
+    await redis.setTTL(conn.id, db, key, truncatedTtl);
+    if (isCurrentDatabase(conn.id, db, version)) {
+      const nextTtlMs = truncatedTtl < 0 ? -1 : truncatedTtl * 1000;
+      state.keys = state.keys.map((k) => (k.key === key ? { ...k, ttlMs: nextTtlMs } : k));
+      if (selection === keySelectionVersion && state.selectedKey === key && state.value?.key === key) {
+        valueRequestVersion += 1;
+        state.valueLoading = false;
+        state.valueError = "";
+        state.value = { ...state.value, ttlMs: nextTtlMs };
+      }
+      notify();
+    }
+    toast("ok", truncatedTtl < 0 ? "已设为持久键" : "TTL 已更新", key);
+    return true;
+  } catch (error) {
+    toast("err", "修改 TTL 失败", errorMessage(error));
+    return false;
+  }
+}
+
+export async function saveStringValue(newValue: string): Promise<boolean> {
+  const conn = currentConnection();
+  if (!conn) return false;
+  if (conn.readOnly) {
+    toast("err", "只读连接", "当前连接为只读模式，不允许修改或删除数据");
+    return false;
+  }
+  const current = state.value;
+  if (!current || current.type !== "string" || state.selectedKey !== current.key || !api.available) return false;
+  const db = currentDb(conn);
+  const version = browserContextVersion;
+  const selection = keySelectionVersion;
+  const key = current.key;
+  try {
+    await redis.setString(conn.id, db, key, newValue);
+    if (isCurrentDatabase(conn.id, db, version)) {
+      const byteLen = new TextEncoder().encode(newValue).byteLength;
+      state.keys = state.keys.map((k) => (k.key === key ? { ...k, sizeBytes: byteLen } : k));
+      if (selection === keySelectionVersion && state.selectedKey === key && state.value?.key === key && state.value.type === "string") {
+        valueRequestVersion += 1;
+        state.valueLoading = false;
+        state.valueError = "";
+        state.value = {
+          ...state.value,
+          stringValue: newValue,
+          sizeBytes: byteLen,
+          totalCount: byteLen,
+          truncated: false,
+        };
+      }
+      notify();
+    }
+    toast("ok", "键值已保存", key);
+    return true;
+  } catch (error) {
+    toast("err", "保存失败", errorMessage(error));
+    return false;
+  }
+}
+
+export async function createNewKey(input: {
+  key: string;
+  type: "string" | "hash";
+  value: string;
+  field?: string;
+  ttlSeconds?: number;
+}): Promise<boolean> {
+  const conn = currentConnection();
+  if (!conn || !api.available) return false;
+  if (conn.readOnly) {
+    toast("err", "只读连接", "当前连接为只读模式，不允许修改或删除数据");
+    return false;
+  }
+  const key = input.key.trim();
+  if (!key) {
+    toast("err", "创建键失败", "键名不能为空");
+    return false;
+  }
+  const field = input.field?.trim() ?? "";
+  if (input.type === "hash" && !field) {
+    toast("err", "创建键失败", "Hash 字段名不能为空");
+    return false;
+  }
+  const db = currentDb(conn);
+  const version = browserContextVersion;
+  const ttlSec = input.ttlSeconds && input.ttlSeconds > 0 ? Math.trunc(input.ttlSeconds) : 0;
+  try {
+    if (input.type === "hash") {
+      await redis.hashSet(conn.id, db, key, field, input.value);
+    } else {
+      await redis.setString(conn.id, db, key, input.value);
+    }
+    if (ttlSec > 0) {
+      await redis.setTTL(conn.id, db, key, ttlSec);
+    }
+    if (isCurrentDatabase(conn.id, db, version)) {
+      const meta: ConnectionKey = {
+        key,
+        type: input.type,
+        ttlMs: ttlSec > 0 ? ttlSec * 1000 : -1,
+        sizeBytes: new TextEncoder().encode(input.value).byteLength,
+        encoding: "",
+      };
+      const existingIdx = state.keys.findIndex((k) => k.key === key);
+      if (existingIdx >= 0) {
+        state.keys = state.keys.map((k, idx) => (idx === existingIdx ? meta : k));
+      } else {
+        state.keys = [meta, ...state.keys];
+      }
+      await openKey(key);
+    }
+    toast("ok", "已创建键", key);
+    return true;
+  } catch (error) {
+    toast("err", "创建键失败", errorMessage(error));
     return false;
   }
 }
@@ -788,8 +1027,13 @@ export function clearCliLog() {
 }
 
 export function setCliReadOnly(readOnly: boolean) {
+  const conn = currentConnection();
   const session = activeCliSession();
   if (!session) return;
+  if (!readOnly && conn?.readOnly) {
+    toast("info", "只读连接", "当前连接已设为只读模式，不可切换为可写");
+    return;
+  }
   session.readOnly = readOnly;
   notify();
 }

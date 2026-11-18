@@ -9,6 +9,7 @@
 # 截图/调试临时目录
 .chrome-profile/
 .shots/
+.impeccable/
 
 # 后续 Go / MyGo 工程
 /build/

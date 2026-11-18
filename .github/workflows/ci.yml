@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.16"
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck frontend
+        run: bun run typecheck
+      - name: Test frontend state
+        run: bun run test:state
+      - name: Test release scripts
+        run: bun run test:release
+      - name: Build web bundle
+        run: bun run build:web
+      - name: Build static site
+        run: bun run build:site
+      - name: Vet Go code
+        run: go vet ./...
+      - name: Test Go code
+        run: go test -race ./...

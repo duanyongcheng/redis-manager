@@ -6,7 +6,7 @@
 #   scripts/build.sh mac --arch universal
 #   scripts/build.sh all          # macOS + web build
 #   scripts/build.sh web          # browser build into build/web
-#   scripts/build.sh checks       # typecheck + go vet only
+#   scripts/build.sh checks       # typecheck + tests + go vet only
 #
 # Flags:
 #   --arch <arm64|amd64|universal>   macOS arch (default: host arch)
@@ -16,7 +16,7 @@
 #                                    default: mygo.json / unsigned)
 #   --skip-dmg                       no disk image
 #   --skip-installer                 no Windows NSIS installer
-#   --no-checks                      skip typecheck + go vet
+#   --no-checks                      skip typecheck + tests + go vet
 #   --no-clean                       keep previous artifacts in build/
 #   -h, --help                       this help
 #
@@ -147,8 +147,12 @@ if [[ $DO_CHECKS -eq 1 ]]; then
   step "Checks"
   node_modules/.bin/tsc --noEmit || die "TypeScript typecheck failed"
   ok "tsc --noEmit"
+  bun run test:state || die "frontend state tests failed"
+  ok "bun run test:state"
   go vet ./... || die "go vet failed"
   ok "go vet ./..."
+  go test ./... || die "go test failed"
+  ok "go test ./..."
 fi
 
 if [[ "$TASK" == "checks" ]]; then

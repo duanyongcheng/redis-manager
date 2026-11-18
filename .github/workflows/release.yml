@@ -57,7 +57,9 @@ jobs:
       - name: Check application code
         run: |
           bun run typecheck
+          bun run test:state
           go vet ./...
+          go test ./...
       - name: Install Windows installer tooling
         if: matrix.target == 'windows-amd64'
         run: sudo apt-get update && sudo apt-get install -y nsis

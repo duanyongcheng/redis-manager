@@ -1,6 +1,6 @@
 import { bytes, bytesParts, connAddress, count, duration, esc, num, pct } from "../core/format";
 import { lineChart } from "../core/charts";
-import { currentConnection, currentHistory, currentMonitor, currentOverview, windowedHistory, type ConnectionView, type MetricSample, type ViewState } from "../core/store";
+import { currentConnection, currentHistory, currentOverview, windowedHistory, type ConnectionView, type MetricSample, type ViewState } from "../core/store";
 import { deriveInsights, type Insight } from "../ui/insights";
 import { emptyState, iconBtn, readout, segmented } from "../ui/kit";
 
@@ -41,7 +41,7 @@ export function overviewView(s: ViewState): string {
 /* Readings strip                                                      */
 /* ------------------------------------------------------------------ */
 
-function readouts(conn: ConnectionView, hist: MetricSample[]): string {
+function readouts(_conn: ConnectionView, hist: MetricSample[]): string {
   const ov = currentOverview()!;
   const last = hist[hist.length - 1];
   const before = hist[hist.length - 2];
@@ -335,7 +335,10 @@ function detailPane(conn: ConnectionView, hist: MetricSample[], index: number): 
       ${kv("keyspaces", keyspaces.length ? `${keyspaces.length} 个库 · ${num(ov.totalKeys)} keys` : "空")}
       ${kv("maxmemory_policy", esc(ov.info["maxmemory_policy"] ?? "—"), { leaf: true, indent: true })}
       ${kv("evicted_keys", count(Number(ov.info["evicted_keys"] ?? 0)), { leaf: true, indent: true, tone: Number(ov.info["evicted_keys"] ?? 0) > 0 ? "warn" : "" })}
-      ${kv("uptime", `${duration(Number(ov.info["uptime_in_days"] ?? 0) * 86_400_000)}`, { leaf: true, indent: true })}
+      ${(() => {
+        const uptimeSec = Number(ov.info["uptime_in_seconds"] ?? (Number(ov.info["uptime_in_days"] ?? 0) * 86_400));
+        return kv("uptime", `${duration(uptimeSec)}`, { leaf: true, indent: true });
+      })()}
     </div>
   </div>`;
 }
@@ -368,6 +371,7 @@ function historyPane(hist: MetricSample[], selected: number, inferred = 0, onset
     series: [{ name: "操作数", values: slice.map((x) => x.ops), fill: true }],
     height: 104,
     yTicks: 3,
+    pointLabels: labels,
     xLabels: [labels[0] ?? "", labels[Math.floor(labels.length / 2)] ?? "", labels[labels.length - 1] ?? ""],
     showLegend: false,
     // The inspected sample is marked on the chart with the accent; a finding's

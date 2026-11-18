@@ -119,7 +119,7 @@ try {
         if (window.__holdUpdateCheck) await new Promise(resolve => { window.__finishUpdateCheck = resolve; });
       },
     };
-    const connections = ["preview", "second"].map(id => ({id, name: id === "preview" ? "预览验证" : "第二个测试连接", group: "Local", host: "localhost", port: 6379, db: 0, mode: "standalone", tls: false, readOnly: true}));
+    const connections = ["preview", "second"].map(id => ({id, name: id === "preview" ? "预览验证" : "第二个测试连接", group: "Local", host: "localhost", port: 6379, db: 0, mode: "standalone", tls: false, readOnly: id === "preview"}));
     const keys = Object.keys(window.__previewValues).map(key => ({key, type: "string", ttlMs: -1, sizeBytes: window.__previewValues[key].length, encoding: "raw"}));
     window.RedisService = {
       listConnections: async () => connections,
@@ -242,6 +242,7 @@ try {
   // The command prompt must remain connected while background data changes.
   await evaluate("document.querySelector('[data-nav=cli]').click()");
   await until(() => evaluate("Boolean(document.querySelector('#cli-input'))"), "CLI prompt");
+  assert.equal(await evaluate("window.__RM_STATE__.cliSessions.second[0].readOnly"), true, "writable connection still starts CLI in read-only mode by default");
   await evaluate("document.querySelector('#cli-input').focus()");
   await send("Input.insertText", { text: 'GET "pending:草稿"' });
   await evaluate("window.__keptCliInput = document.querySelector('#cli-input'); window.__keptCliInput.setSelectionRange(4, 11, 'backward'); window.__cliPollStart = window.__overviewCalls");
@@ -263,6 +264,7 @@ try {
     store.toast('info', 'CLI regression notification');
     window.__RM_SETTINGS__.patch({scheme: 'dark'});
   })`);
+  assert.equal(await evaluate("window.__RM_STATE__.cliSessions.second[0].readOnly"), false, "writable connection allows switching CLI session to writable");
   assert.deepEqual(await cliInputState(), pendingInput, "mode, clear, notification and scheme updates preserve the draft");
   await evaluate("document.querySelector('[data-fill=DBSIZE]').click()");
   await evaluate("import('/src/core/store.ts').then(store => store.loadOverview())");
@@ -319,9 +321,9 @@ try {
   await evaluate("document.querySelector('#cli-input').value = 'GET previous-connection'; window.__RM_STATE__.pageByConn.preview = 'cli'; document.querySelector('[data-conn=preview]').click()");
   await until(() => evaluate("window.__RM_STATE__.connId === 'preview' && Boolean(document.querySelector('#cli-input'))"), "CLI connection change");
   assert.notEqual(await evaluate("document.querySelector('#cli-input').value"), "GET previous-connection", "connection changes do not carry commands into another connection");
-  assert.deepEqual(await evaluate("window.__cliCalls.map(({id, db, command}) => ({id, db, command}))"), [
-    {id: "second", db: 0, command: "DBSIZE"}, {id: "second", db: 0, command: "PING"},
-    {id: "second", db: 0, command: "DBSIZE"}, {id: "second", db: 0, command: "DBSIZE"},
+  assert.deepEqual(await evaluate("window.__cliCalls.map(({id, db, command, readOnly}) => ({id, db, command, readOnly}))"), [
+    {id: "second", db: 0, command: "DBSIZE", readOnly: false}, {id: "second", db: 0, command: "PING", readOnly: false},
+    {id: "second", db: 0, command: "DBSIZE", readOnly: false}, {id: "second", db: 0, command: "DBSIZE", readOnly: false},
   ], "only explicitly submitted commands reach the selected Redis context");
 
   // Application metadata and update dispatch do not depend on a Redis key.
@@ -371,7 +373,9 @@ try {
 
   await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: fixtureScript.identifier });
   await send("Page.navigate", { url: `${url}/?page=settings` });
-  await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]')) && !window.__RM_STATE__.appInfoLoading"), "ordinary browser settings");
+  await until(() => evaluate("Boolean(document.querySelector('[data-action=check-updates]')) && !window.__RM_STATE__.appInfoLoading && Boolean(window.__RM_READY__)"), "ordinary browser settings");
+  assert.equal(await evaluate("window.__RM_STATE__.serviceAvailable"), false, "plain browser without native bridge marks serviceAvailable false");
+  assert.equal(await evaluate("Boolean(document.querySelector('.preview-note'))"), true, "plain browser without native bridge renders preview banner");
   assert.equal(await evaluate("document.querySelector('[data-action=check-updates]').disabled"), true, "browser without a native bridge cannot check updates");
   assert.ok((await evaluate("document.querySelector('[data-update-status]').textContent")).includes("浏览器预览"));
   assert.deepEqual(exceptions, [], "no browser runtime errors");
