@@ -284,3 +284,7 @@ build/darwin-arm64/
 - [版本更新日志](CHANGELOG.md)
 - [GitHub 发布与自动更新指南](docs/releases.md)
 - [文档与历史设计索引](docs/README.md)
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。
